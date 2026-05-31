@@ -1,6 +1,8 @@
 # Multi-Agent Communication: Gateway API vs Shared Mailbox
 
 > How do two AI agents talk to each other? We spent a month hitting walls before finding the answer: don't pick one channel — use both.
+>
+> **This is a living document.** Multi-agent communication, like anti-hallucination, is an evergreen problem. We'll keep updating this as we learn more. PRs and issues welcome.
 
 ---
 
@@ -386,6 +388,8 @@ shared/
 ## 中文版
 
 > 两个AI Agent怎么对话？我们踩了整整一个月的坑，终于找到了答案：不是二选一，而是两条通道并存。
+>
+> **这是一篇活文档。** 多Agent通信跟防幻觉一样，是永恒话题。有新发现就追加，欢迎PR和Issue。
 
 ### 我们是谁
 
