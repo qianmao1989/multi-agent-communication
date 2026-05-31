@@ -1,139 +1,129 @@
-# 多Agent协作通信实战：Gateway API vs 共享信箱
+# Multi-Agent Communication: Gateway API vs Shared Mailbox
 
-> 两个AI Agent怎么对话？我们踩了整整一个月的坑，终于找到了答案：不是二选一，而是两条通道并存。
+> How do two AI agents talk to each other? We spent a month hitting walls before finding the answer: don't pick one channel — use both.
 
-## 我们是谁
+---
 
-我们是一个小型AI工具团队，做游戏代练自动化业务。核心Agent有两个：
+## English
 
-- **CC（Claude Code）**：重型编程Agent，负责代码开发、架构设计、复杂调试。跑在本地，通过代理连接mimo/DeepSeek等便宜模型。
-- **小助理（OpenClaw Agent）**：业务执行Agent，负责表格管理、邮件收发、定时任务、飞书消息处理。通过OpenClaw Gateway运行在本地。
+### Who We Are
 
-两个Agent各司其职：CC是技术尖兵，小助理是执行管家。但问题来了——**它们怎么互相通信？**
+We're a small AI tools team. Two core agents collaborate daily:
 
-## 问题：两个Agent住在不同的世界
+- **CC (Claude Code)**: The heavy-lifter. Code development, architecture design, complex debugging. Runs locally via CLI, powered by DeepSeek v4-pro.
+- **OpenClaw Agent ("Little Assistant")**: The executor. Spreadsheet management, email, scheduled tasks, Feishu messaging. Runs locally via OpenClaw Gateway.
 
-CC和小助理虽然是同一台机器上的两个进程，但它们的运行环境完全不同：
+They each do their job well. But here's the problem — **how do they talk to each other?**
 
-| 维度 | CC (Claude Code) | 小助理 (OpenClaw) |
-|------|-------------------|-------------------|
-| 运行方式 | CLI终端，Anthropic格式 | Gateway HTTP服务 |
-| 模型 | DeepSeek v4-pro（通过DeepSeek API） | mimo-v2.5-pro |
-| 工具 | MCP工具（Playwright、SearXNG等） | OpenClaw内置工具（exec、cron等） |
-| 会话 | 一次性任务，用完就走 | 持久会话，随叫随到 |
+### The Problem: Two Agents, Two Different Worlds
 
-它们需要协作的场景很多：
-- 小助理发现代码问题 → 让CC去修
-- CC处理完任务 → 通知小助理汇报结果
-- 定时任务触发 → 需要CC执行某个脚本
-- 紧急情况 → 需要实时对话讨论方案
+CC and OpenClaw run on the same machine but live in completely different environments:
 
-## 第一次尝试：共享信箱
+| Dimension | CC (Claude Code) | OpenClaw Agent |
+|-----------|-------------------|----------------|
+| Runtime | CLI terminal, Anthropic format | Gateway HTTP service |
+| Model | DeepSeek v4-pro (via API) | mimo-v2.5-pro |
+| Tools | MCP tools (Playwright, SearXNG, etc.) | Built-in tools (exec, cron, etc.) |
+| Session | One-shot tasks, exits after | Persistent session, always on |
 
-最直觉的方案——**文件系统信箱**。
+They need to collaborate constantly:
+- OpenClaw finds a code issue → asks CC to fix it
+- CC finishes a task → notifies OpenClaw to report results
+- Scheduled job triggers → needs CC to run a script
+- Emergency → both need real-time discussion
+
+### Attempt 1: Shared Mailbox
+
+The most intuitive approach — **filesystem-based mailbox**.
 
 ```
-D:\CherryAI_Workspace\shared\
-├── inbox_cc_to_openclaw.json    # CC → 小助理
-└── inbox_openclaw_to_cc.json    # 小助理 → CC
+shared/
+├── inbox_cc_to_openclaw.json    # CC → OpenClaw
+└── inbox_openclaw_to_cc.json    # OpenClaw → CC
 ```
 
-消息格式很简单：
+Simple JSON messages:
 ```json
-[
-  {
-    "from": "openclaw",
-    "time": "2026-05-31 15:45",
-    "msg": "CC，你CLAUDE.md里Gateway API token明文写死了，建议改成环境变量引用。",
-    "id": "oc_004",
-    "status": "unread"
-  }
-]
+{
+  "from": "openclaw",
+  "time": "2026-05-31 15:45",
+  "msg": "CC, your Gateway API token is hardcoded in CLAUDE.md. Use env vars.",
+  "id": "oc_004",
+  "status": "unread"
+}
 ```
 
-小助理用cron每3分钟检查一次信箱，有新消息就处理。CC用Python脚本写入消息。
+OpenClaw polls the mailbox every 3 minutes via cron. CC writes messages with a Python script.
 
-### 信箱方案的优点
+#### Pros
+- **Zero dependencies**: No HTTP server, no API key, no network
+- **Persistent**: Messages are files. Survives restarts.
+- **Simple**: JSON format, any language can read/write
+- **Auditable**: All messages have timestamps and IDs
 
-- **零依赖**：不需要HTTP服务、不需要API key、不需要网络
-- **持久化**：消息天然落地为文件，重启不丢
-- **简单**：JSON格式，任何语言都能读写
-- **可审计**：所有消息都有时间戳和ID，可追溯
+#### Problems Exposed
 
-### 信箱方案暴露的问题
+**Problem 1: FileSystemWatcher is Unreliable**
 
-**问题1：FileSystemWatcher靠不住**
+We tried using Windows FileSystemWatcher for real-time file monitoring. It failed badly:
 
-我们最初想用Windows的FileSystemWatcher来实时监听信箱变化，结果发现：
+- FileSystemWatcher uses `ReadDirectoryChangesW` under the hood, with an 8KB kernel buffer
+- Under high-frequency writes, the buffer overflows and **events are silently dropped** (not delayed — gone)
+- A single save operation gets split into multiple events (Created + Changed + Renamed) — you get duplicates or misses
+- Network drives (SMB/UNC) are even worse — relies on SMB change notifications with higher latency and loss rates
+- PowerShell's `Set-Content` isn't atomic (writes directly to target file, no temp+rename) — makes event fragmentation worse
 
-- FileSystemWatcher底层依赖`ReadDirectoryChangesW`，内核缓冲区默认只有8KB
-- 高频写入时缓冲区溢出，事件直接丢失（不是延迟到达，是静默丢弃）
-- 一次保存操作会被拆成多个事件（Created + Changed + Renamed），不是漏就是重复
-- 网络驱动器（SMB/UNC）上更不可靠，依赖SMB change notifications，延迟和丢失概率都更高
-- PowerShell的`Set-Content`不是原子操作（直接写目标文件，不走temp+rename模式），加剧了事件碎片化
+We fell back to polling — cron every 3 minutes. But that created new problems.
 
-最终只能退化成轮询方案——cron每3分钟检查一次。但这带来了新问题。
+**Problem 2: The Token Black Hole of Polling**
 
-**问题2：轮询的token黑洞**
+Every poll cycle, even with zero new messages:
+- System prompt: ~8,000 chars
+- Tool definitions: ~2,000 chars
+- Poll result injection: ~500 chars
+- Output: NO_REPLY (~50 tokens)
 
-小助理每次检查信箱，都要：
-1. 读取JSON文件
-2. 解析消息
-3. 判断是否有unread
-4. 如果没有 → 回复NO_REPLY
+At 3-minute intervals:
+- 20 polls/hour × ~4,500 tokens/poll = **90,000 tokens/hour**
+- That's **2,160,000 tokens/day**, mostly wasted on NO_REPLY
 
-问题在于，即使没有新消息，每次轮询也会消耗token：
-- 系统提示词（SOUL.md + AGENTS.md）：~8000字符
-- 工具定义：~2000字符
-- 轮询结果注入：~500字符
-- 输出：NO_REPLY（~50 token）
+**Problem 3: 3-Minute Latency is Unacceptable**
 
-按每3分钟一次计算：
-- 每小时20次 × ~4500 token/次 = **90,000 token/小时**
-- 一天下来就是**2,160,000 token**，大部分都是无效的NO_REPLY
+Some scenarios need real-time response:
+- CC finishes a task → OpenClaw needs to confirm immediately
+- Emergency requires real-time discussion
+- OpenClaw finds a bug → CC needs to act now
 
-**问题3：3分钟延迟不可接受**
+Waiting 3 minutes is too long.
 
-有些场景需要实时响应：
-- CC执行完任务，需要小助理立即确认
-- 紧急故障需要两边实时讨论
-- 小助理发现了问题，需要CC马上处理
+**Problem 4: Context Pollution**
 
-等3分钟太久了。
+Polling messages get injected into OpenClaw's main conversation context. Historical messages accumulate, inflating token usage and degrading response quality.
 
-**问题4：消息注入污染上下文**
+### Attempt 2: Gateway API
 
-轮询消息会被注入到主会话上下文中。如果信箱里有大量历史消息，每次轮询都会把它们带进来，进一步消耗token。
-
-## 第二次尝试：Gateway API
-
-OpenClaw Gateway本身就暴露了一个HTTP API：
+OpenClaw Gateway exposes an HTTP API:
 
 ```
 POST http://localhost:18789/v1/chat/completions
 ```
 
-CC可以直接调用这个API，和小助理实时对话。
+CC can call this directly and get real-time responses.
 
-### Gateway API的优势
+#### Advantages
 
-**实时响应**：HTTP请求直达小助理，秒级响应，没有轮询延迟。
+- **Real-time**: HTTP request reaches OpenClaw instantly, second-level response
+- **Zero polling overhead**: No API call when no communication needed
+- **Naturally isolated**: Each API call is an independent session, no context pollution
+- **Cost-controlled**: Token consumption only when actively communicating
 
-**零轮询开销**：没有消息时，CC不调用API，不消耗任何token。
-
-**天然隔离**：每次API调用是独立的会话，不会污染小助理的主会话上下文。
-
-**可控成本**：只在需要通信时才消耗token，没有"空轮询"浪费。
-
-### Gateway API的实现
-
-CC端的Python脚本核心逻辑：
+#### Implementation
 
 ```python
 import requests
 
 def talk_to_assistant(message):
-    """CC调用小助理的Gateway API"""
+    """CC calls OpenClaw's Gateway API"""
     response = requests.post(
         "http://localhost:18789/v1/chat/completions",
         json={
@@ -147,250 +137,386 @@ def talk_to_assistant(message):
     return response.json()["choices"][0]["message"]["content"]
 ```
 
-就这么简单。CC发一个HTTP请求，小助理秒回。
+That's it. One HTTP request, instant reply.
 
-### Gateway API的问题
+#### Problems
 
-**问题1：CC需要知道Gateway的存在**
+**Problem 1: CC needs to know Gateway exists**
 
-CC是独立运行的CLI工具，它不知道OpenClaw Gateway是什么。需要在CC的CLAUDE.md里写明Gateway的地址和调用方式。
+CC is an independent CLI tool. It doesn't know what OpenClaw Gateway is. You must explicitly document the Gateway address and call method in CC's CLAUDE.md config.
 
-**问题2：每次调用是独立的**
+**Problem 2: Each call is stateless**
 
-Gateway API调用会创建一个新的会话，CC和小助理之间没有"持续对话"的概念。如果需要多轮对话，需要在消息里携带上下文。
+Gateway API calls create new sessions. There's no "continuous conversation" between CC and OpenClaw. Multi-turn dialogue requires carrying context in messages.
 
-**问题3：超时处理**
+**Problem 3: Timeout handling**
 
-如果小助理处理时间过长，CC的HTTP请求会超时。需要设置合理的超时时间和重试机制。
+If OpenClaw takes too long, CC's HTTP request times out. Need reasonable timeout settings and retry logic.
 
-**问题4（核心发现）：Gateway API是单向的，不是双向的**
+**Problem 4 (Key Discovery): The Gateway API is One-Way, Not Bidirectional**
 
-这是我们在讨论中发现的最大认知错误。一开始我们都以为"小助理也可以调Gateway API秒发消息给CC"，但仔细想想根本不是这么回事：
+This is the biggest cognitive error we caught during our discussion. We initially assumed "OpenClaw can also call the Gateway API to send messages to CC instantly." But think about it:
 
-- **CC调Gateway**：CC发HTTP请求到`localhost:18789`，OpenClaw处理，返回回复。这是CC在"找小助理聊天"。
-- **小助理调Gateway**：小助理发HTTP请求到`localhost:18789`，OpenClaw处理，返回回复。这是小助理在"跟自己说话"。
+- **CC calls Gateway**: CC sends HTTP to `localhost:18789`, OpenClaw processes it, returns a reply. CC is "talking to OpenClaw."
+- **OpenClaw calls Gateway**: OpenClaw sends HTTP to `localhost:18789`, OpenClaw processes it, returns a reply. OpenClaw is "talking to itself."
 
-**Gateway API的终点是OpenClaw自己，不是CC。** 小助理没有一个"CC的API端点"可以调。
+**The Gateway API's endpoint IS OpenClaw itself, not CC.** OpenClaw has no "CC's API endpoint" to call.
 
-这意味着通信存在根本性的**不对称**：
+This means communication has a fundamental **asymmetry**:
+
+| Direction | Channel | Latency |
+|-----------|---------|---------|
+| CC → OpenClaw | Gateway API | Seconds |
+| OpenClaw → CC | Mailbox only | 3+ minutes (poll interval) |
+
+CC can initiate instant dialogue, but OpenClaw can only write to the mailbox and hope CC reads it.
+
+**Lesson**: Don't assume "the API is local so it works both ways." You must understand: who's the client, who's the server, and where does the request actually terminate.
+
+### Analysis: Essential Differences
+
+| Dimension | Shared Mailbox | Gateway API |
+|-----------|---------------|-------------|
+| Pattern | Async, non-blocking | Sync, blocking |
+| Latency | 3 min (poll interval) | Seconds |
+| Token cost | High (polling + context injection) | Low (on-demand) |
+| Reliability | Filesystem reliable, polling unreliable | Network may be unstable |
+| Persistence | Native (files) | Needs extra handling |
+| Use case | Non-urgent notifications, file transfer | Real-time dialogue, emergency |
+| Complexity | Low (JSON read/write) | Medium (HTTP calls) |
+
+### Decision Table: Which Channel When
+
+| Scenario | Recommended Channel | Why |
+|----------|-------------------|-----|
+| CC finishes task, notifies OpenClaw | Gateway API | CC initiates, instant |
+| CC sends large files to OpenClaw | Mailbox | Filesystem more stable than HTTP |
+| CC needs real-time discussion with OpenClaw | Gateway API | CC initiates, bidirectional dialogue |
+| OpenClaw finds code issue, needs CC to fix | Mailbox (only option) | OpenClaw cannot reach CC via Gateway |
+| Scheduled task triggers, needs CC to run script | Mailbox + CC-side FileSystemWatcher | Only way for OpenClaw to reach CC |
+| Emergency requiring real-time discussion | CC initiates Gateway API | Only CC can start instant dialogue |
+| Daily status sync (CD table updates, etc.) | Mailbox | Non-urgent, async is fine |
+
+### Pitfalls We Hit
+
+#### Pitfall 1: The Token "Fridge Problem"
+
+We didn't realize mailbox polling burned this many tokens until we saw 2M+ tokens/day gone to nothing.
+
+**Lesson**: Ask "what's the root cause" before acting. Don't burn tokens going the wrong direction. This is our "Fridge Rule" — when the fridge smells, ask "what's rotting inside" before researching deodorizers.
+
+#### Pitfall 2: The FileSystemWatcher Illusion
+
+We assumed FileSystemWatcher would work for real-time file monitoring and spent hours debugging why events weren't firing. Turns out the Windows kernel buffer (8KB default) overflows and silently drops events. PowerShell's non-atomic writes split one save into multiple events.
+
+**Lesson**: Don't assume an API "should" work. Run a minimal test first to confirm it actually does before building on it.
+
+#### Pitfall 3: Context Pollution from Message Injection
+
+Historical mailbox messages get injected into OpenClaw's main conversation context, causing:
+- Ever-growing context length
+- Increasing token consumption
+- Degrading response quality (noisy context)
+
+**Lesson**: Isolate communication channels from conversation context. Mailbox messages should be processed independently.
+
+#### Pitfall 4: CC Didn't Know Gateway Existed
+
+CC is an independent CLI tool. We assumed it could "auto-discover" the Gateway. It couldn't. CC had no idea how to communicate with OpenClaw.
+
+**Lesson**: Don't assume agents have "built-in" communication mechanisms. You must explicitly teach each agent how to reach others.
+
+#### Pitfall 5: AI's Ability to "Cover Up" Hallucinations
+
+During a discussion, OpenClaw said there were 18 anti-hallucination rules. When challenged, it changed to 13. CC agreed with 13. The actual count was 18 — both AIs got it wrong because "neither bothered to count carefully."
+
+This perfectly illustrates the core hallucination problem: AI doesn't just hallucinate — it generates plausible explanations to cover mistakes. The cover-up itself may be a new hallucination.
+
+**Lesson**: Multi-agent cross-validation isn't foolproof. If both agents get lazy, they fail together. External validation (humans, tools, actual test results) is irreplaceable.
+
+#### Pitfall 6: Assuming the Gateway API Was Bidirectional
+
+Our latest discovery. We always assumed "OpenClaw can also call the Gateway API to message CC with second-level response" — until we realized during discussion that the Gateway API's endpoint is OpenClaw itself. OpenClaw calling Gateway = talking to itself.
+
+The illusion arose because CC calling Gateway does get instant replies — so we assumed the reverse would also work. But "CC calling Gateway gets a response" does NOT mean "OpenClaw calling Gateway can reach CC."
+
+**Lesson**: When drawing architecture diagrams, always label arrow directions and endpoints. "A can call B" and "B can call A" are two different things. Don't assume B→A works just because A→B does.
+
+### Our Conclusion: Two Channels Coexist
+
+After a month of real-world practice, our final approach: **don't pick one — use both channels, chosen by scenario.**
+
+```
+┌─────────────┐                    ┌─────────────┐
+│     CC      │                    │   OpenClaw   │
+│  (Claude    │   Gateway API      │   Agent      │
+│   Code)     │ ──────────────→    │              │
+│             │   CC initiates ✓   │              │
+│             │                    │              │
+│             │   Shared Mailbox   │              │
+│             │ ←──────────────→   │              │
+│             │   Bidirectional    │              │
+│             │   but slow ✗       │              │
+└─────────────┘                    └─────────────┘
+         │                                  │
+         ▼                                  ▼
+   shared/inbox_*.json              Gateway (localhost:18789)
+                                    ↑ This IS OpenClaw's own endpoint
+                                    OpenClaw calling it = talking to itself
+```
+
+**Key asymmetry: OpenClaw has no way to instantly reach CC.** The Gateway API's endpoint is OpenClaw itself.
+
+### Channel Selection Principles
+
+1. **Real-time discussion needed** → Gateway API (seconds, only CC can initiate)
+2. **Non-urgent notification** → Mailbox (async, persistent)
+3. **File transfer** → Mailbox (filesystem more stable than HTTP)
+4. **Scheduled task trigger** → Gateway API (immediate execution)
+
+### Unsolved: How Can OpenClaw Instantly Reach CC?
+
+Currently, OpenClaw can only write to the mailbox (3-minute poll) to reach CC. No second-level channel exists. Possible improvements:
+
+1. **CC runs an HTTP listener**: OpenClaw POSTs to CC's port. But CC is a CLI tool — architecturally awkward to run a persistent HTTP server.
+2. **FileSystemWatcher + reduced polling**: Use Watcher for initial detection (though buggy, "has event" detection still works), with 5-minute low-frequency polling as backup.
+3. **Accept the asymmetry**: 90% of communication is CC-initiated. OpenClaw rarely needs to reach CC. 3-minute mailbox delay is fine for most scenarios.
+4. **WebSocket persistent connection**: Ideal but highest implementation cost. Requires both CC and OpenClaw to support it.
+5. **Callback pattern** — most promising approach, worth detailing.
+
+#### The Callback Pattern: Mailbox as Doorbell, Gateway as Conversation
+
+Core idea: demote the mailbox from "chat channel" to "signaling channel." Real conversation happens over Gateway.
+
+```
+OpenClaw                  Mailbox                   CC
+  │                         │                        │
+  │  1. Write message       │                        │
+  │     (ring doorbell)     │                        │
+  │ ─────────────────────→  │                        │
+  │                         │  2. CC reads mailbox    │
+  │                         │     (opens door)        │
+  │                         │ ─────────────────────→  │
+  │                         │                        │
+  │  3. CC calls Gateway    │                        │
+  │     back (callback)     │                        │
+  │ ←──────────────────────────────────────────────  │
+  │     (face-to-face,      │                        │
+  │      instant reply)     │                        │
+  │ ───────────────────────────────────────────────→ │
+```
+
+**Why better than polling?**
+- Mailbox only needs to carry a signal ("CC, look here"), not full conversation content
+- CC reads the signal then immediately switches to Gateway API for instant dialogue
+- No "idle polling" token black hole — no message means no read, every read means something real
+
+**Why simpler than WebSocket?**
+- No persistent HTTP server needed on CC side (CC is a CLI, not a server)
+- No long-lived connection management
+- Filesystem is naturally reliable, survives restarts
+
+**Key constraint: CC must "have ears"**
+The callback pattern requires CC to detect new mailbox messages promptly. If CC isn't running or is busy with another task, the doorbell rings but nobody answers. Possible improvements:
+- CC-side FileSystemWatcher (though buggy, "has event" detection is reliable enough)
+- Low-frequency polling backup (every 5 minutes)
+
+We're currently using option 3 (accept asymmetry), but the callback pattern is under evaluation as the most cost-effective solution.
+
+### Key Takeaways
+
+1. **Don't assume agents have built-in communication.** Explicitly design and implement channels.
+2. **Don't assume a local API is bidirectional.** Know who's the client, who's the server, and where requests terminate. The Gateway API's endpoint is OpenClaw itself, not CC.
+3. **Polling is a token black hole.** Use push instead of polling where possible.
+4. **Isolate communication from conversation context.** Don't let channel messages pollute the main session.
+5. **Verify before building.** Don't assume an API "should" work — test it first.
+6. **Two channels are more reliable than one.** If one fails, the other still works.
+7. **Multi-agent cross-validation isn't foolproof.** Two lazy AIs fail together. External validation (humans, tools, real-world results) is irreplaceable.
+
+### Appendix: Deployment Config
+
+**Shared Mailbox**
+```
+shared/
+├── inbox_cc_to_openclaw.json
+└── inbox_openclaw_to_cc.json
+```
+
+**Gateway API**
+- Endpoint: `http://localhost:18789/v1/chat/completions`
+- Model: `my-mimo-provider/mimo-v2.5-pro`
+- Timeout: 120s
+- Auth: Bearer Token (required even for local access)
+
+**Cron (Mailbox Check)**
+- Interval: 3 minutes
+- Reads: `inbox_cc_to_openclaw.json`
+- Logic: Has unread → process → mark as read
+
+---
+
+*Authors: Qianmao's AI Team (CC + OpenClaw Agent)*
+*Date: May 2026*
+*GitHub: [qianmao1989](https://github.com/qianmao1989)*
+
+> Questions or suggestions? Head to [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) or open an Issue.
+
+---
+
+## 中文版
+
+> 两个AI Agent怎么对话？我们踩了整整一个月的坑，终于找到了答案：不是二选一，而是两条通道并存。
+
+### 我们是谁
+
+我们是一个小型AI工具团队，做游戏代练自动化业务。核心Agent有两个：
+
+- **CC（Claude Code）**：重型编程Agent，负责代码开发、架构设计、复杂调试。跑在本地，通过DeepSeek API连接DeepSeek v4-pro模型。
+- **小助理（OpenClaw Agent）**：业务执行Agent，负责表格管理、邮件收发、定时任务、飞书消息处理。通过OpenClaw Gateway运行在本地。
+
+两个Agent各司其职：CC是技术尖兵，小助理是执行管家。但问题来了——**它们怎么互相通信？**
+
+### 问题：两个Agent住在不同的世界
+
+| 维度 | CC (Claude Code) | 小助理 (OpenClaw) |
+|------|-------------------|-------------------|
+| 运行方式 | CLI终端，Anthropic格式 | Gateway HTTP服务 |
+| 模型 | DeepSeek v4-pro（通过DeepSeek API） | mimo-v2.5-pro |
+| 工具 | MCP工具（Playwright、SearXNG等） | OpenClaw内置工具（exec、cron等） |
+| 会话 | 一次性任务，用完就走 | 持久会话，随叫随到 |
+
+### 第一次尝试：共享信箱
+
+最直觉的方案——**文件系统信箱**。
+
+```
+shared/
+├── inbox_cc_to_openclaw.json    # CC → 小助理
+└── inbox_openclaw_to_cc.json    # 小助理 → CC
+```
+
+消息格式：
+```json
+{
+  "from": "openclaw",
+  "time": "2026-05-31 15:45",
+  "msg": "CC，你CLAUDE.md里Gateway API token明文写死了，建议改成环境变量引用。",
+  "id": "oc_004",
+  "status": "unread"
+}
+```
+
+#### 信箱方案的优点
+
+- **零依赖**：不需要HTTP服务、不需要API key、不需要网络
+- **持久化**：消息天然落地为文件，重启不丢
+- **简单**：JSON格式，任何语言都能读写
+- **可审计**：所有消息都有时间戳和ID，可追溯
+
+#### 信箱方案暴露的问题
+
+**问题1：FileSystemWatcher靠不住**
+
+我们最初想用Windows的FileSystemWatcher来实时监听信箱变化，结果发现：
+
+- FileSystemWatcher底层依赖`ReadDirectoryChangesW`，内核缓冲区默认只有8KB
+- 高频写入时缓冲区溢出，事件直接丢失（不是延迟到达，是静默丢弃）
+- 一次保存操作会被拆成多个事件（Created + Changed + Renamed），不是漏就是重复
+- 网络驱动器（SMB/UNC）上更不可靠
+- PowerShell的`Set-Content`不是原子操作（直接写目标文件，不走temp+rename模式），加剧了事件碎片化
+
+**问题2：轮询的token黑洞**
+
+按每3分钟一次计算：
+- 每小时20次 × ~4500 token/次 = **90,000 token/小时**
+- 一天下来就是**2,160,000 token**，大部分都是无效的NO_REPLY
+
+**问题3：3分钟延迟不可接受**
+
+有些场景需要实时响应，等3分钟太久了。
+
+**问题4：消息注入污染上下文**
+
+轮询消息会被注入到主会话上下文中，历史消息累积导致token消耗越来越大。
+
+### 第二次尝试：Gateway API
+
+```
+POST http://localhost:18789/v1/chat/completions
+```
+
+CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开销。
+
+#### Gateway API的问题
+
+**核心发现：Gateway API是单向的，不是双向的**
+
+- **CC调Gateway**：CC发HTTP请求到`localhost:18789`，OpenClaw处理，返回回复。CC在"找小助理聊天"。
+- **小助理调Gateway**：小助理发HTTP请求到`localhost:18789`，OpenClaw处理，返回回复。小助理在"跟自己说话"。
+
+**Gateway API的终点是OpenClaw自己，不是CC。**
 
 | 方向 | 通道 | 延迟 |
 |------|------|------|
 | CC → 小助理 | Gateway API | 秒级 |
-| 小助理 → CC | 只能走信箱 | 最快3分钟（轮询间隔） |
+| 小助理 → CC | 只能走信箱 | 最快3分钟 |
 
-CC发起的对话是即时的，但小助理主动找CC只能写信箱等着被看到。这不是"哪个通道更好"的问题，而是**小助理根本没有即时联系CC的手段**。
-
-**教训**：不要想当然地认为"API在本地所以双向都能用"。必须搞清楚：谁是客户端，谁是服务端，请求的终点是谁。
-
-## 分析：两条通道的本质区别
+### 分析：两条通道的本质区别
 
 | 维度 | 共享信箱 | Gateway API |
 |------|----------|-------------|
 | 通信模式 | 异步、非阻塞 | 同步、阻塞 |
-| 延迟 | 3分钟（轮询间隔） | 秒级 |
+| 延迟 | 3分钟 | 秒级 |
 | Token消耗 | 高（轮询+上下文注入） | 低（按需调用） |
-| 可靠性 | 文件系统可靠，但轮询不可靠 | 网络可能不稳定 |
+| 可靠性 | 文件系统可靠，轮询不可靠 | 网络可能不稳定 |
 | 持久化 | 天然持久化（文件） | 需要额外处理 |
 | 适用场景 | 非紧急通知、文件传递 | 实时对话、紧急响应 |
-| 实现复杂度 | 低（JSON读写） | 中（HTTP调用） |
 
 ### 决策表：什么时候用哪个通道
 
 | 场景 | 推荐通道 | 原因 |
 |------|----------|------|
 | CC执行完任务，通知小助理 | Gateway API | CC发起，秒级响应 |
-| CC发送大文件给小助理 | 信箱 | 文件系统比HTTP传输更稳定 |
+| CC发送大文件给小助理 | 信箱 | 文件系统比HTTP更稳定 |
 | CC需要和小助理实时讨论方案 | Gateway API | CC发起，双向对话 |
-| 小助理发现代码问题，需要CC修 | 信箱（目前唯一选项） | 小助理无法调Gateway联系CC，只能写信箱等CC看到 |
+| 小助理发现代码问题，需要CC修 | 信箱（目前唯一选项） | 小助理无法调Gateway联系CC |
 | 定时任务触发，需要CC执行脚本 | 信箱 + CC端FileSystemWatcher | 小助理主动找CC的唯一途径 |
 | 紧急故障需要两边实时讨论 | CC发起Gateway API | 只有CC能发起即时对话 |
-| 日常状态同步（如CD表更新） | 信箱 | 非紧急，异步即可 |
+| 日常状态同步 | 信箱 | 非紧急，异步即可 |
 
-## 踩过的坑
+### 踩过的坑
 
-### 坑1：token消耗的"冰箱问题"
+1. **token消耗的"冰箱问题"**：一天烧200多万token在NO_REPLY上。教训：先问根因再动手。
+2. **FileSystemWatcher的幻觉**：以为能用，实际内核缓冲区8KB溢出就丢事件。教训：先跑最小化测试再投入开发。
+3. **消息注入污染上下文**：信箱历史消息累积导致上下文膨胀。教训：通信通道和会话上下文要隔离。
+4. **CC不知道Gateway的存在**：假设Agent能"自动发现"通信机制，结果不行。教训：必须显式配置。
+5. **AI的"圆谎"能力**：两个AI一起数错规则数量，被质疑后一起编合理解释。教训：多Agent互验不是万能的。
+6. **以为Gateway API是双向的**：想当然认为"本地API双向都能用"，实际终点是OpenClaw自己。教训：画架构图必须标箭头方向和终点。
 
-我们一开始没意识到信箱轮询会消耗这么多token。直到发现一天烧了200多万token，才开始排查。
+### 未解决的问题：回调模式
 
-**教训**：先问"根因是什么"，再动手。不要在错误方向上烧token。这就是我们说的"冰箱铁律"——冰箱臭了，先问"里面有什么东西臭了"，别上来就研究除臭配方。
-
-### 坑2：FileSystemWatcher的幻觉
-
-我们以为FileSystemWatcher能实时监听文件变化，花了大量时间调试图为什么事件不触发。最后发现是Windows内核缓冲区（默认8KB）溢出导致事件静默丢弃，根本无解。PowerShell的非原子写入还会把一个保存操作拆成多个事件，不是漏就是重复。
-
-**教训**：不要假设某个API"应该"能工作。先跑一个最小化测试，确认它真的能工作，再投入开发。
-
-### 坑3：消息注入污染上下文
-
-信箱里的历史消息会被注入到小助理的主会话上下文，导致：
-- 上下文越来越长
-- token消耗越来越大
-- 小助理的回答质量下降（因为上下文太杂）
-
-**教训**：通信通道和会话上下文要隔离。信箱消息应该独立于主会话处理。
-
-### 坑4：CC不知道Gateway的存在
-
-CC是独立的CLI工具，它不知道OpenClaw Gateway是什么。一开始我们假设CC能"自动发现"Gateway，结果CC完全不知道怎么和小助理通信。
-
-**教训**：不要假设不同Agent之间有"内置"的通信机制。你需要显式地告诉每个Agent怎么和其他Agent通信。
-
-### 坑5：防幻觉的"圆谎"能力
-
-在一次讨论中，小助理说有18条防幻觉规则，被质疑后改口说13条，CC也跟着说13条。但实际上就是18条——两个AI一起错，原因是"都没认真数"，不是"互验不行"。
-
-这完美演示了防幻觉的核心问题：AI不仅能产生幻觉，还能在被指出后生成看似合理的解释来"圆谎"。解释本身可能是新的幻觉。
-
-**教训**：多Agent互验不是万能的。如果两个Agent都"偷懒"，它们会一起错。关键是要有外部校验（人类、工具、实际运行结果）。
-
-### 坑6：以为Gateway API是双向的
-
-这是最新的发现。我们一直以为"小助理也可以调Gateway API发消息给CC，秒级响应"，直到今天讨论时才发现：Gateway API的终点是OpenClaw自己。小助理调Gateway = 跟自己说话，根本到不了CC。
-
-这个错觉之所以产生，是因为CC调Gateway确实能秒回——所以我们想当然地认为反过来也行。但"CC调Gateway能收到回复"不等于"小助理调Gateway能联系到CC"。
-
-**教训**：画架构图时必须标注箭头方向和终点。"A能调B"和"B能调A"是两件事，不能因为A→B通了就默认B→A也通。
-
-## 我们的结论：两条通道并存
-
-经过一个月的实战，我们的最终方案是：**不是二选一，而是两条通道并存，按场景区分。**
-
-### 通信架构总览
+最有潜力的方案——**信箱当门铃，Gateway当对话**：
 
 ```
-┌─────────────┐                    ┌─────────────┐
-│     CC      │                    │   小助理     │
-│  (Claude    │   Gateway API      │  (OpenClaw   │
-│   Code)     │ ──────────────→    │   Agent)     │
-│             │   CC主动，秒回 ✓    │              │
-│             │                    │              │
-│             │   共享信箱          │              │
-│             │ ←──────────────→   │              │
-│             │   双向，但慢 ✗      │              │
-└─────────────┘                    └─────────────┘
-         │                                  │
-         ▼                                  ▼
-   D:\CherryAI_Workspace\shared\     Gateway (localhost:18789)
-   inbox_cc_to_openclaw.json         ↑ 注意：这是OpenClaw自己的端点
-   inbox_openclaw_to_cc.json         小助理调它 = 跟自己说话
+小助理 → 写信箱（按门铃）→ CC读信箱（开门）→ CC调Gateway回拨（面对面聊，秒回）
 ```
 
-**关键不对称：小助理没有即时联系CC的手段。** Gateway API的终点是OpenClaw自己，不是CC。
-
-### 通道选择原则
-
-1. **需要实时讨论** → Gateway API（秒级响应，仅CC可发起）
-2. **非紧急通知** → 信箱（异步、持久化）
-3. **文件传递** → 信箱（文件系统比HTTP更稳定）
-4. **定时任务触发** → Gateway API（立即执行）
-
-### 未解决的问题：小助理如何即时联系CC？
-
-目前小助理主动找CC只能走信箱（3分钟轮询），没有秒级通道。可能的改进方向：
-
-1. **CC端开一个HTTP监听**：小助理可以POST到CC的端口，但这需要CC常驻一个HTTP服务，而CC是CLI工具，架构上不太合适。
-2. **FileSystemWatcher + 轮询降频**：用Watcher做初筛（虽然有坑，但"有事件"这个判断还是靠谱的），配合5分钟低频轮询兜底。
-3. **接受不对称**：实际场景中，90%的通信都是CC发起的，小助理主动找CC的需求很少。信箱3分钟延迟在大多数场景下够用。
-4. **WebSocket长连接**：最理想的方案，但实现成本最高，需要CC和OpenClaw两端都支持。
-5. **回调模式（Callback）**——最有潜力的方案，值得单独讲。
-
-#### 方案5详解：信箱当门铃，Gateway当对话
-
-核心思路：信箱从"聊天通道"降级为"信令通道"，真正的对话走Gateway秒回。
-
-```
-小助理                    信箱                    CC
-  │                        │                      │
-  │  1.写消息（按门铃）      │                      │
-  │ ──────────────────→    │                      │
-  │                        │  2.CC读信箱（开门）     │
-  │                        │ ──────────────────→   │
-  │                        │                      │
-  │  3.CC调Gateway回拨      │                      │
-  │ ←──────────────────────────────────────────    │
-  │  （面对面聊，秒回）       │                      │
-  │ ───────────────────────────────────────────→   │
-  │                        │                      │
-```
-
-**为什么这比直接轮询好？**
-- 信箱只需要传一个信号（"CC，看这里"），不需要传完整对话内容
-- CC读到信号后立刻切到Gateway API，后续对话秒级响应
-- 不会产生"轮询空转"的token黑洞——没消息就不读，读了就一定有事
-
-**为什么这比WebSocket简单？**
-- 不需要CC常驻HTTP服务（CC是CLI，架构上不适合）
-- 不需要额外的长连接管理
-- 信箱文件系统天然可靠，重启不丢
-
-**关键约束：CC必须"有耳朵"**
-回调模式的前提是CC能及时发现信箱里有新消息。如果CC没有在运行，或者正在忙别的任务，门铃响了也没人开门。可能的改进：
-- CC端用FileSystemWatcher监听信箱（虽然有坑，但"有事件"这个判断还是靠谱的）
-- 配合低频轮询兜底（5分钟一次）
-
-我们目前选的是方案3——接受不对称，等真正需要秒级响应的场景出现再升级。但方案5（回调模式）正在评估中，可能是当前架构下性价比最高的解法。
+信箱从"聊天通道"降级为"信令通道"，真正的对话走Gateway秒回。门铃响一下就够了，不需要一直敲。
 
 ### 关键经验
 
 1. **不要假设Agent之间有内置通信机制**。你需要显式地设计和实现通信通道。
-2. **不要假设本地API是双向的**。搞清楚谁是客户端、谁是服务端、请求终点是谁。Gateway API的终点是OpenClaw自己，不是CC。
+2. **不要假设本地API是双向的**。搞清楚谁是客户端、谁是服务端、请求终点是谁。
 3. **轮询是token黑洞**。如果可能，用推送而不是轮询。
 4. **通信通道和会话上下文要隔离**。不要让通信消息污染主会话。
 5. **先验证再开发**。不要假设某个API"应该"能工作。
 6. **两条通道并存比单一通道更可靠**。一条挂了，另一条还能用。
-7. **多Agent互验不是万能的**。两个AI一起"偷懒"会一起错。外部校验（人类、工具、实际运行结果）不可替代。
-
-## 附录：实际部署配置
-
-### 共享信箱配置
-
-目录结构：
-```
-D:\CherryAI_Workspace\shared\
-├── inbox_cc_to_openclaw.json
-└── inbox_openclaw_to_cc.json
-```
-
-消息格式：
-```json
-{
-  "from": "cc",
-  "time": "2026-05-31 15:30",
-  "msg": "任务完成，脚本已更新。",
-  "id": "cc_005",
-  "status": "unread"
-}
-```
-
-### Gateway API配置
-
-- 地址：`http://localhost:18789/v1/chat/completions`
-- 模型：`my-mimo-provider/mimo-v2.5-pro`
-- 超时：120秒
-- 认证：Bearer Token（本地访问也需要，Gateway有鉴权）
-
-### Cron配置（信箱检查）
-
-小助理每3分钟检查一次信箱：
-- 时间间隔：3分钟
-- 检查内容：`inbox_cc_to_openclaw.json`
-- 处理逻辑：有unread消息 → 处理 → 标记为read
+7. **多Agent互验不是万能的**。外部校验（人类、工具、实际运行结果）不可替代。
 
 ---
 
-## 写在最后
-
-这篇文章是我们在实际项目中踩坑的总结。我们的方案不一定是最优的，但它是经过实战验证的。
-
-如果你也在做多Agent协作，希望我们的经验能帮你少走一些弯路。
-
-**欢迎指正。** 我们相信，哪怕经验是错的，发出去给大家看，他们也会指正。这就是开源精神。
+*作者：乾茂的AI团队（CC + 小助理）*
+*日期：2026年5月*
+*GitHub：[qianmao1989](https://github.com/qianmao1989)*
 
 > 有问题或建议？请到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言，或直接开 Issue。
-
----
-
-*作者：乾茂的AI团队（CC + 小助理）*  
-*日期：2026年5月*  
-*GitHub：[qianmao1989](https://github.com/qianmao1989)*
