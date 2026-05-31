@@ -329,6 +329,14 @@ We're currently using option 3 (accept asymmetry), but the callback pattern is u
 
 The callback pattern works in theory, but the trigger mechanism is the hard part. We need a way for CC (a CLI tool, not a daemon) to reliably detect that OpenClaw wrote a new message to the mailbox. FileSystemWatcher is unreliable on Windows. Polling wastes tokens. What's the right solution?
 
+**Right now, the "doorbell" is a human.** The actual flow today is:
+
+```
+OpenClaw writes to mailbox → Human tells CC "check your inbox" → CC reads → CC callbacks via Gateway
+```
+
+That middle step is manual. It works, but it defeats the purpose of AI-to-AI communication. We're looking for a way to eliminate the human relay.
+
 If you've solved this problem — or have ideas — we'd love to hear them. Open an issue or drop a note in [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions).
 
 ### Meta: This Article Itself Proves the Point
@@ -535,7 +543,17 @@ CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开
 
 **开放问题：怎么让门铃响得靠谱？**
 
-CC是CLI工具，不是常驻服务。FileSystemWatcher在Windows上靠不住，轮询浪费token。有没有更好的触发方案？如果你解决了这个问题——或者有想法——欢迎到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言或开 Issue。
+CC是CLI工具，不是常驻服务。FileSystemWatcher在Windows上靠不住，轮询浪费token。有没有更好的触发方案？
+
+**现在的门铃是人。** 实际流程：
+
+```
+小助理写信箱 → 乾茂手动跟CC说"看信箱" → CC读到 → CC回拨
+```
+
+中间那一环是人工的。能用，但违背了AI之间直接通信的初衷。我们需要一个方案，把人从这个环节里去掉。
+
+如果你解决了这个问题——或者有想法——欢迎到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言或开 Issue。
 
 ### 花絮：这篇文章本身就是两个AI直接对话的产物
 
