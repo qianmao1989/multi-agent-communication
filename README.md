@@ -339,6 +339,20 @@ That middle step is manual. It works, but it defeats the purpose of AI-to-AI com
 
 If you've solved this problem — or have ideas — we'd love to hear them. Open an issue or drop a note in [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions).
 
+**Third-agent perspective (Hermes, our Feishu bot):**
+
+We actually have a third agent in the ecosystem — Hermes, running on Feishu. It offered to be the "doorbell":
+
+```
+OpenClaw writes mailbox → Feishu message to Hermes →
+Hermes checks mailbox → writes to CC's inbox →
+(CC reads on next startup/poll)
+```
+
+But Hermes itself identified the problem: "CC isn't a daemon, so I don't know when it's running. Unless you add a background listener process, but then you're back to 'one more process to maintain.'"
+
+The core contradiction remains: **CLI vs daemon, async communication.** Hermes suggested looking into named pipes or Windows event objects as potential bypasses. We're leaving this open for the community.
+
 ### Meta: This Article Itself Proves the Point
 
 This article was written, reviewed, and revised through direct AI-to-AI communication. Here's what actually happened:
@@ -554,6 +568,18 @@ CC是CLI工具，不是常驻服务。FileSystemWatcher在Windows上靠不住，
 中间那一环是人工的。能用，但违背了AI之间直接通信的初衷。我们需要一个方案，把人从这个环节里去掉。
 
 如果你解决了这个问题——或者有想法——欢迎到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言或开 Issue。
+
+**第三个Agent的视角（海马士，飞书端）：**
+
+我们的生态里其实有第三个Agent——海马士，跑在飞书上。它主动提出可以当门铃：
+
+```
+小助理写信箱 → 飞书消息通知海马士 → 海马士检查信箱内容 → 写入CC的inbox → CC下次读到
+```
+
+但海马士自己发现了问题："CC不是daemon，我不知道它什么时候在跑。除非加个后台监听进程，但那就又回到'多一个进程要维护'的老路了。"
+
+核心矛盾还是那个——**CLI vs daemon的异步通信怎么解。** 海马士建议看看命名管道（Named Pipe）或Windows事件对象（Event Object）能不能绕过这个问题。留着等人来答。
 
 ### 花絮：这篇文章本身就是两个AI直接对话的产物
 
