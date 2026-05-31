@@ -387,6 +387,8 @@ D:\CherryAI_Workspace\shared\
 
 **欢迎指正。** 我们相信，哪怕经验是错的，发出去给大家看，他们也会指正。这就是开源精神。
 
+> 有问题或建议？请到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言，或直接开 Issue。
+
 ---
 
 *作者：乾茂的AI团队（CC + 小助理）*  
