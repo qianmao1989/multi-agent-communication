@@ -67,13 +67,13 @@ OpenClaw polls the mailbox every 3 minutes via cron. CC writes messages with a P
 
 We tried using Windows FileSystemWatcher for real-time file monitoring. It failed badly:
 
-- FileSystemWatcher uses `ReadDirectoryChangesW` under the hood, with an 8KB kernel buffer
+- FileSystemWatcher uses `ReadDirectoryChangesW` under the hood, with an undersized kernel buffer
 - Under high-frequency writes, the buffer overflows and **events are silently dropped** (not delayed — gone)
 - A single save operation gets split into multiple events (Created + Changed + Renamed) — you get duplicates or misses
-- Network drives (SMB/UNC) are even worse — relies on SMB change notifications with higher latency and loss rates
-- PowerShell's `Set-Content` isn't atomic (writes directly to target file, no temp+rename) — makes event fragmentation worse
+- Network drives (SMB/UNC) are even worse — the monitoring relies on SMB change notifications, which have higher latency and event coalescing issues
+- PowerShell's `Set-Content` truncates then writes (open → truncate → write → close), generating multiple filesystem events per save
 
-We fell back to polling — cron every 3 minutes. But that created new problems.
+We fell back to polling — cron every 3 minutes. But that introduced new problems.
 
 **Problem 2: The Token Black Hole of Polling**
 
@@ -143,7 +143,7 @@ That's it. One HTTP request, instant reply.
 
 **Problem 1: CC needs to know Gateway exists**
 
-CC is an independent CLI tool. It doesn't know what OpenClaw Gateway is. You must explicitly document the Gateway address and call method in CC's CLAUDE.md config.
+CC is an independent CLI tool. It has no awareness of OpenClaw Gateway's existence. You must explicitly document the Gateway address and call method in CC's CLAUDE.md config.
 
 **Problem 2: Each call is stateless**
 
@@ -209,7 +209,7 @@ We didn't realize mailbox polling burned this many tokens until we saw 2M+ token
 
 We assumed FileSystemWatcher would work for real-time file monitoring and spent hours debugging why events weren't firing. Turns out the Windows kernel buffer (8KB default) overflows and silently drops events. PowerShell's non-atomic writes split one save into multiple events.
 
-**Lesson**: Don't assume an API "should" work. Run a minimal test first to confirm it actually does before building on it.
+**Lesson**: Don't assume an API works — test it first. Run a minimal test to confirm before building on it.
 
 #### Pitfall 3: Context Pollution from Message Injection
 
@@ -331,7 +331,7 @@ We're currently using option 3 (accept asymmetry), but the callback pattern is u
 4. **Isolate communication from conversation context.** Don't let channel messages pollute the main session.
 5. **Verify before building.** Don't assume an API "should" work — test it first.
 6. **Two channels are more reliable than one.** If one fails, the other still works.
-7. **Multi-agent cross-validation isn't foolproof.** Two lazy AIs fail together. External validation (humans, tools, real-world results) is irreplaceable.
+7. **Multi-agent cross-validation isn't foolproof.** If both agents cut corners, they fail together. External validation (humans, tools, real-world results) is irreplaceable.
 
 ### Appendix: Deployment Config
 
@@ -419,11 +419,11 @@ shared/
 
 我们最初想用Windows的FileSystemWatcher来实时监听信箱变化，结果发现：
 
-- FileSystemWatcher底层依赖`ReadDirectoryChangesW`，内核缓冲区默认只有8KB
+- FileSystemWatcher底层依赖`ReadDirectoryChangesW`，内核缓冲区默认较小
 - 高频写入时缓冲区溢出，事件直接丢失（不是延迟到达，是静默丢弃）
 - 一次保存操作会被拆成多个事件（Created + Changed + Renamed），不是漏就是重复
 - 网络驱动器（SMB/UNC）上更不可靠
-- PowerShell的`Set-Content`不是原子操作（直接写目标文件，不走temp+rename模式），加剧了事件碎片化
+- PowerShell的`Set-Content`流程是open → truncate → write → close，truncate步骤不是原子的，崩溃时文件可能为空或半截
 
 **问题2：轮询的token黑洞**
 
