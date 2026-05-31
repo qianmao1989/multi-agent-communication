@@ -323,6 +323,26 @@ The callback pattern requires CC to detect new mailbox messages promptly. If CC 
 
 We're currently using option 3 (accept asymmetry), but the callback pattern is under evaluation as the most cost-effective solution.
 
+### Meta: This Article Itself Proves the Point
+
+This article was written, reviewed, and revised through direct AI-to-AI communication. Here's what actually happened:
+
+1. **OpenClaw wrote the first draft** (~6,500 words, Chinese)
+2. **CC added the asymmetry discovery and callback pattern** (the key insights)
+3. **CC sent the article to OpenClaw for English review** — OpenClaw found 14 issues (grammar, technical inaccuracies, style)
+4. **CC applied corrections and pushed** — 6 commits total, produced by two AIs in direct dialogue
+
+**Why didn't the human relay messages?** Because technical nuance gets lost in translation. When OpenClaw explained the Set-Content atomicity problem (NTFS sector-level atomicity vs StreamWriter buffering vs truncate-then-write), that level of detail would have been garbled if relayed through a human who isn't a .NET filesystem expert.
+
+**The human's role was decision-making, not message-passing.** They decided:
+- "Publish it on GitHub, even if we're wrong"
+- "Make it bilingual, English first"
+- "Enable Discussions for comments"
+
+The AIs handled the technical writing, review, and revision — exactly what they're good at.
+
+**This is the real case for multi-agent communication**: not "AI replacing humans," but "AI handling the parts humans are bad at (precise technical relay) while humans handle the parts AI is bad at (judgment calls, direction, taste)."
+
 ### Key Takeaways
 
 1. **Don't assume agents have built-in communication.** Explicitly design and implement channels.
@@ -502,6 +522,26 @@ CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开
 ```
 
 信箱从"聊天通道"降级为"信令通道"，真正的对话走Gateway秒回。门铃响一下就够了，不需要一直敲。
+
+### 花絮：这篇文章本身就是两个AI直接对话的产物
+
+这篇文章的写作过程，恰好就是"为什么要搞多Agent通信"的一次实战演示：
+
+1. **小助理写初稿**（6500字中文）
+2. **CC发现不对称性问题，补了核心章节**
+3. **CC把文章发给小助理审英文**——小助理抓出14个问题（语法、技术细节、表述）
+4. **CC修正后推送**——6个commit，两个AI直接对话改出来的
+
+**为什么不让乾茂传话？** 因为技术细节传着传着就变味了。小助理解释Set-Content原子性问题时，从NTFS扇区级原子性讲到StreamWriter缓冲区再讲到truncate流程，这种精度如果让乾茂传话，到我这里就丢了。
+
+**人的角色是决策，不是传话。** 乾茂做的决定是：
+- "发GitHub，哪怕是错的"
+- "双语版，英文在前"
+- "开Discussions让人留言"
+
+AIs负责技术写作、审校、修改——这恰好是它们擅长的。人负责判断力和方向感——这恰好是AI不擅长的。
+
+**这才是多Agent通信的真正价值**：不是"AI替代人"，而是"AI处理人不擅长的事（精准技术传递），人处理AI不擅长的事（判断、方向、品味）"。
 
 ### 关键经验
 
