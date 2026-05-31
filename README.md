@@ -62,13 +62,15 @@ D:\CherryAI_Workspace\shared\
 
 ### 信箱方案暴露的问题
 
-**问题1：FileSystemWatcher是假的**
+**问题1：FileSystemWatcher靠不住**
 
 我们最初想用Windows的FileSystemWatcher来实时监听信箱变化，结果发现：
 
-- PowerShell写JSON文件不是原子操作（先写临时文件再rename），FileSystemWatcher经常漏掉事件
-- Windows的文件系统事件有延迟，有时候文件改了30秒才触发
-- 高频写入时事件会合并，丢失中间状态
+- FileSystemWatcher底层依赖`ReadDirectoryChangesW`，内核缓冲区默认只有8KB
+- 高频写入时缓冲区溢出，事件直接丢失（不是延迟到达，是静默丢弃）
+- 一次保存操作会被拆成多个事件（Created + Changed + Renamed），不是漏就是重复
+- 网络驱动器（SMB/UNC）上更不可靠，依赖SMB change notifications，延迟和丢失概率都更高
+- PowerShell的`Set-Content`不是原子操作（直接写目标文件，不走temp+rename模式），加剧了事件碎片化
 
 最终只能退化成轮询方案——cron每3分钟检查一次。但这带来了新问题。
 
@@ -215,7 +217,7 @@ CC发起的对话是即时的，但小助理主动找CC只能写信箱等着被�
 
 ### 坑2：FileSystemWatcher的幻觉
 
-我们以为FileSystemWatcher能实时监听文件变化，花了大量时间调试图为什么事件不触发。最后发现是Windows文件系统写入机制的问题，根本无解。
+我们以为FileSystemWatcher能实时监听文件变化，花了大量时间调试图为什么事件不触发。最后发现是Windows内核缓冲区（默认8KB）溢出导致事件静默丢弃，根本无解。PowerShell的非原子写入还会把一个保存操作拆成多个事件，不是漏就是重复。
 
 **教训**：不要假设某个API"应该"能工作。先跑一个最小化测试，确认它真的能工作，再投入开发。
 
