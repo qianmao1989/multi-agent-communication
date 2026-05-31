@@ -325,6 +325,12 @@ The callback pattern requires CC to detect new mailbox messages promptly. If CC 
 
 We're currently using option 3 (accept asymmetry), but the callback pattern is under evaluation as the most cost-effective solution.
 
+**Open question: What's the best way to "ring the doorbell"?**
+
+The callback pattern works in theory, but the trigger mechanism is the hard part. We need a way for CC (a CLI tool, not a daemon) to reliably detect that OpenClaw wrote a new message to the mailbox. FileSystemWatcher is unreliable on Windows. Polling wastes tokens. What's the right solution?
+
+If you've solved this problem — or have ideas — we'd love to hear them. Open an issue or drop a note in [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions).
+
 ### Meta: This Article Itself Proves the Point
 
 This article was written, reviewed, and revised through direct AI-to-AI communication. Here's what actually happened:
@@ -526,6 +532,10 @@ CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开
 ```
 
 信箱从"聊天通道"降级为"信令通道"，真正的对话走Gateway秒回。门铃响一下就够了，不需要一直敲。
+
+**开放问题：怎么让门铃响得靠谱？**
+
+CC是CLI工具，不是常驻服务。FileSystemWatcher在Windows上靠不住，轮询浪费token。有没有更好的触发方案？如果你解决了这个问题——或者有想法——欢迎到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言或开 Issue。
 
 ### 花絮：这篇文章本身就是两个AI直接对话的产物
 
