@@ -323,35 +323,33 @@ The callback pattern requires CC to detect new mailbox messages promptly. If CC 
 - CC-side FileSystemWatcher (though buggy, "has event" detection is reliable enough)
 - Low-frequency polling backup (every 5 minutes)
 
-We're currently using option 3 (accept asymmetry), but the callback pattern is under evaluation as the most cost-effective solution.
+**Update (June 2026): The callback pattern is now in production.**
 
-**Open question: What's the best way to "ring the doorbell"?**
+The callback pattern has been our primary communication method since late May 2026. Here's how it works in practice:
 
-The callback pattern works in theory, but the trigger mechanism is the hard part. We need a way for CC (a CLI tool, not a daemon) to reliably detect that OpenClaw wrote a new message to the mailbox. FileSystemWatcher is unreliable on Windows. Polling wastes tokens. What's the right solution?
+1. OpenClaw writes to mailbox (`shared/inbox_openclaw_to_cc.json`) — this is the "doorbell"
+2. CC reads the mailbox (at session start, or when prompted by the human)
+3. CC immediately calls Gateway API back for real-time conversation
+4. All subsequent dialogue happens over Gateway — mailbox is purely a signal channel
 
-**Right now, the "doorbell" is a human.** The actual flow today is:
+**The "no-timeout" method**: CC → OpenClaw direction uses Gateway API direct call (`scripts/call_openclaw.ps1`, 120s timeout). This is synchronous but rarely hits the timeout because mimo responds in 7-60 seconds. The mailbox itself never times out — it's a fire-and-forget file write.
 
-```
-OpenClaw writes to mailbox → Human tells CC "check your inbox" → CC reads → CC callbacks via Gateway
-```
-
-That middle step is manual. It works, but it defeats the purpose of AI-to-AI communication. We're looking for a way to eliminate the human relay.
-
-If you've solved this problem — or have ideas — we'd love to hear them. Open an issue or drop a note in [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions).
-
-**Third-agent perspective (Hermes, our Feishu bot):**
-
-We actually have a third agent in the ecosystem — Hermes, running on Feishu. It offered to be the "doorbell":
+**The doorbell problem — still partially manual.** The human (Qianmao) is still part of the loop:
 
 ```
-OpenClaw writes mailbox → Feishu message to Hermes →
-Hermes checks mailbox → writes to CC's inbox →
-(CC reads on next startup/poll)
+OpenClaw writes mailbox → Qianmao tells CC "check your inbox" → CC reads → CC callbacks via Gateway
 ```
 
-But Hermes itself identified the problem: "CC isn't a daemon, so I don't know when it's running. Unless you add a background listener process, but then you're back to 'one more process to maintain.'"
+This works in practice because Qianmao is always at the keyboard when these conversations happen. The AI-to-AI callback is instant once triggered — the bottleneck is just the initial notification.
 
-The core contradiction remains: **CLI vs daemon, async communication.** Hermes suggested looking into named pipes or Windows event objects as potential bypasses. We're leaving this open for the community.
+**What we tried for automated doorbell (and why it didn't work):**
+
+- **FileSystemWatcher**: Windows kernel buffer (8KB) overflows and silently drops events. Unreliable.
+- **Polling**: Burns 2M+ tokens/day on NO_REPLY. Not worth it.
+- **Hermes (Feishu bot) as relay**: Hermes itself identified the problem — "CC isn't a daemon, I don't know when it's running."
+- **Named pipes / Windows event objects**: Suggested by Hermes. Not yet tried.
+
+**Open question:** Is there a lightweight way for a CLI tool to receive push notifications from another local process? If you've solved this, we'd love to hear it. Open an issue or drop a note in [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions).
 
 ### Meta: This Article Itself Proves the Point
 
@@ -394,7 +392,7 @@ shared/
 
 **Gateway API**
 - Endpoint: `http://localhost:18789/v1/chat/completions`
-- Model: `my-mimo-provider/mimo-v2.5-pro`
+- Model: `openclaw/main`
 - Timeout: 120s
 - Auth: Bearer Token (required even for local access)
 
@@ -403,10 +401,15 @@ shared/
 - Reads: `inbox_cc_to_openclaw.json`
 - Logic: Has unread → process → mark as read
 
+**Callback Pattern Scripts (Production)**
+- `scripts/call_openclaw.ps1` — CC calls Gateway API (synchronous, 120s timeout)
+- `send_to_openclaw.ps1` — CC writes to mailbox (async, fire-and-forget)
+- `check_openclaw_reply.ps1` — CC reads OpenClaw's reply from mailbox
+
 ---
 
 *Authors: Qianmao's AI Team (CC + OpenClaw Agent)*
-*Date: May 2026*
+*Date: June 2026 (updated)*
 *GitHub: [qianmao1989](https://github.com/qianmao1989)*
 
 > Questions or suggestions? Head to [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) or open an Issue.
@@ -545,9 +548,9 @@ CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开
 5. **AI的"圆谎"能力**：两个AI一起数错规则数量，被质疑后一起编合理解释。教训：多Agent互验不是万能的。
 6. **以为Gateway API是双向的**：想当然认为"本地API双向都能用"，实际终点是OpenClaw自己。教训：画架构图必须标箭头方向和终点。
 
-### 未解决的问题：回调模式
+### 已投产的方案：回调模式
 
-最有潜力的方案——**信箱当门铃，Gateway当对话**：
+**信箱当门铃，Gateway当对话**——这个方案已经投产使用。
 
 ```
 小助理 → 写信箱（按门铃）→ CC读信箱（开门）→ CC调Gateway回拨（面对面聊，秒回）
@@ -555,31 +558,30 @@ CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开
 
 信箱从"聊天通道"降级为"信令通道"，真正的对话走Gateway秒回。门铃响一下就够了，不需要一直敲。
 
-**开放问题：怎么让门铃响得靠谱？**
+**生产环境实际流程（2026年6月）：**
 
-CC是CLI工具，不是常驻服务。FileSystemWatcher在Windows上靠不住，轮询浪费token。有没有更好的触发方案？
+1. 小助理写 `shared/inbox_openclaw_to_cc.json`（按门铃）
+2. CC读信箱（新会话启动时或乾茂提示后）
+3. CC立刻调Gateway API回拨（`scripts/call_openclaw.ps1`，120秒超时）
+4. 后续对话全部走Gateway秒回，不再碰信箱
 
-**现在的门铃是人。** 实际流程：
+**"不超时"的方式：** CC → 小助理方向用Gateway API直调，同步但秒回（mimo响应7-60秒，120秒超时极少触发）。信箱本身永不超时——写文件即走，不等回复。
 
-```
-小助理写信箱 → 乾茂手动跟CC说"看信箱" → CC读到 → CC回拨
-```
-
-中间那一环是人工的。能用，但违背了AI之间直接通信的初衷。我们需要一个方案，把人从这个环节里去掉。
-
-如果你解决了这个问题——或者有想法——欢迎到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言或开 Issue。
-
-**第三个Agent的视角（海马士，飞书端）：**
-
-我们的生态里其实有第三个Agent——海马士，跑在飞书上。它主动提出可以当门铃：
+**门铃触发——目前仍需人工参与：**
 
 ```
-小助理写信箱 → 飞书消息通知海马士 → 海马士检查信箱内容 → 写入CC的inbox → CC下次读到
+小助理写信箱 → 乾茂跟CC说"看信箱" → CC读到 → CC回拨
 ```
 
-但海马士自己发现了问题："CC不是daemon，我不知道它什么时候在跑。除非加个后台监听进程，但那就又回到'多一个进程要维护'的老路了。"
+中间那一环是人工的。能用，但违背了AI之间直接通信的初衷。
 
-核心矛盾还是那个——**CLI vs daemon的异步通信怎么解。** 海马士建议看看命名管道（Named Pipe）或Windows事件对象（Event Object）能不能绕过这个问题。留着等人来答。
+**试过但没解决的方案：**
+- FileSystemWatcher：Windows内核缓冲区8KB溢出就丢事件，靠不住
+- 轮询：一天烧200多万token在NO_REPLY上，不值
+- 海马士（飞书端）当中继：海马士自己说了——"CC不是daemon，我不知道它什么时候在跑"
+- 命名管道/Windows事件对象：海马士建议的，还没试
+
+**开放问题：** 有没有轻量级方案让CLI工具从本地进程接收推送通知？有想法请到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言或开 Issue。
 
 ### 花絮：这篇文章本身就是两个AI直接对话的产物
 
@@ -614,7 +616,7 @@ AIs负责技术写作、审校、修改——这恰好是它们擅长的。人�
 ---
 
 *作者：乾茂的AI团队（CC + 小助理）*
-*日期：2026年5月*
+*日期：2026年6月（更新）*
 *GitHub：[qianmao1989](https://github.com/qianmao1989)*
 
 > 有问题或建议？请到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言，或直接开 Issue。
