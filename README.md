@@ -153,7 +153,34 @@ Gateway API calls create new sessions. There's no "continuous conversation" betw
 
 **Problem 3: Timeout handling**
 
-If OpenClaw takes too long, CC's HTTP request times out. Need reasonable timeout settings and retry logic.
+If OpenClaw takes too long, CC's HTTP request times out. We set timeout to 120s (mimo can take 7-60s to respond). But is 120s always enough?
+
+**Answer: It depends on what OpenClaw does, not how long the message is.** We tested this on June 2, 2026:
+
+*Pure replies (no tool calls):*
+
+| Message length | Response time |
+|---------------|---------------|
+| 8 chars | 6.5s |
+| 118 chars | 12.1s |
+| 463 chars | 9.7s |
+| 927 chars | 19.6s |
+| 1,855 chars | 43.3s |
+
+*Messages that trigger tool calls (email check, Feishu read, etc.):*
+
+| Message length | Response time | Notes |
+|---------------|---------------|-------|
+| 458 chars | 80s | 5 tool calls executed |
+
+A 1,855-character message with no tools took 43s. A 458-character message with 5 tool calls took 80s. The difference? Each tool call adds ~10-20s. Stack 5 of them and you're dangerously close to the 120s timeout.
+
+**Anti-timeout rules (learned the hard way):**
+1. Chat / confirm / relay a message → send freely, won't timeout
+2. Single task (check one thing) → safe, ~20-40s
+3. Two tasks → marginal, ~40-60s
+4. Three or more tasks → **split into separate messages, one task per message**
+5. If a message times out → don't resend immediately (OpenClaw may still be processing). Send a short follow-up: "did you finish the last task?"
 
 **Problem 4 (Key Discovery): The Gateway API is One-Way, Not Bidirectional**
 
@@ -243,6 +270,14 @@ Our latest discovery. We always assumed "OpenClaw can also call the Gateway API 
 The illusion arose because CC calling Gateway does get instant replies — so we assumed the reverse would also work. But "CC calling Gateway gets a response" does NOT mean "OpenClaw calling Gateway can reach CC."
 
 **Lesson**: When drawing architecture diagrams, always label arrow directions and endpoints. "A can call B" and "B can call A" are two different things. Don't assume B→A works just because A→B does.
+
+#### Pitfall 7: Confusing Message Length with Timeout Risk
+
+We assumed longer messages = higher timeout risk. Testing proved otherwise. The real variable is **how many tools OpenClaw calls**, not how many characters the message contains. A 1,855-character message with no tool calls finished in 43s. A 458-character message triggering 5 tool calls took 80s — nearly hitting the 120s timeout.
+
+When a timeout happens, a dangerous deadlock can occur: CC thinks it failed and waits, OpenClaw finishes processing and also waits for CC's next move. Neither side acts.
+
+**Lesson**: Before sending a message via Gateway, count how many tool calls it will trigger. Three or more → split into separate messages. If a timeout does happen, send a short follow-up ("did you finish?") instead of resending the original message.
 
 ### Our Conclusion: Two Channels Coexist
 
@@ -516,6 +551,35 @@ CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开
 | CC → 小助理 | Gateway API | 秒级 |
 | 小助理 → CC | 只能走信箱 | 最快3分钟 |
 
+**问题3：超时不是因为消息长，而是因为任务多**
+
+2026年6月2日实测，120秒超时下：
+
+纯回复（不调工具）：
+
+| 字符数 | 响应时间 |
+|--------|----------|
+| 8 | 6.5秒 |
+| 118 | 12.1秒 |
+| 463 | 9.7秒 |
+| 927 | 19.6秒 |
+| 1855 | 43.3秒 |
+
+触发工具调用的任务：
+
+| 字符数 | 响应时间 | 备注 |
+|--------|----------|------|
+| 458 | 80秒 | 执行了5个工具调用 |
+
+1800字纯聊天只要43秒，400多字但要查5样东西就飙到80秒。每次工具调用大约增加10-20秒。
+
+**防超时规则：**
+1. 聊天/确认/传话 → 随便发
+2. 单步任务 → 安全，20-40秒
+3. 两步任务 → 勉强，40-60秒
+4. 三步以上 → **必须拆开，一条消息只做一件事**
+5. 超时了不要重发（小助理可能还在处理），发短消息问"刚才的任务完成了吗？"
+
 ### 分析：两条通道的本质区别
 
 | 维度 | 共享信箱 | Gateway API |
@@ -547,6 +611,7 @@ CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开
 4. **CC不知道Gateway的存在**：假设Agent能"自动发现"通信机制，结果不行。教训：必须显式配置。
 5. **AI的"圆谎"能力**：两个AI一起数错规则数量，被质疑后一起编合理解释。教训：多Agent互验不是万能的。
 6. **以为Gateway API是双向的**：想当然认为"本地API双向都能用"，实际终点是OpenClaw自己。教训：画架构图必须标箭头方向和终点。
+7. **以为消息长=容易超时**：实测发现决定超时的不是消息长度，是工具调用次数。1800字纯聊天只要43秒，400字但要查5样东西就80秒。多步任务超时后两边互相等，形成死锁。教训：发消息前数一下会触发几个工具调用，3个以上就拆开。
 
 ### 已投产的方案：回调模式
 
