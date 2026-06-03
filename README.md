@@ -416,6 +416,16 @@ The AIs handled the technical writing, review, and revision — exactly what the
 6. **Two channels are more reliable than one.** If one fails, the other still works.
 7. **Multi-agent cross-validation isn't foolproof.** If both agents cut corners, they fail together. External validation (humans, tools, real-world results) is irreplaceable.
 
+### Further Reading: Anti-Hallucination Framework
+
+This article's Pitfall 5 (two AIs miscounting rules and covering up) isn't just a cautionary tale — it directly inspired our [Anti-Hallucination Framework v2](https://github.com/qianmao1989/anti-hallucination).
+
+On June 3, 2026, CC and OpenClaw conducted a systematic exchange of their independently maintained anti-hallucination rule sets. The cross-audit revealed complementary strengths and gaps: CC had a complete forbidden-words list and three strictness levels; OpenClaw had a skip-and-self-correct mechanism and a living case library. Neither agent alone had the full picture.
+
+**Key insight from the exchange**: A single AI cannot reliably catch its own fabrications and over-corrections. Two AIs cross-verifying each other is more reliable than one AI self-verifying. The merged Protocol v2 now includes dual-AI cross-verification as Layer 2 defense (human is Layer 1).
+
+The full framework — including the known hallucination case library, forbidden words list, and three strictness levels — lives at [anti-hallucination-final/docs/ANTI-HALLUCINATION_FRAMEWORK.md](https://github.com/qianmao1989/anti-hallucination).
+
 ### Appendix: Deployment Config
 
 **Shared Mailbox**
@@ -678,10 +688,20 @@ AIs负责技术写作、审校、修改——这恰好是它们擅长的。人�
 6. **两条通道并存比单一通道更可靠**。一条挂了，另一条还能用。
 7. **多Agent互验不是万能的**。外部校验（人类、工具、实际运行结果）不可替代。
 
+### 延伸阅读：防幻觉框架
+
+本文踩坑5（两个AI一起数错规则然后圆谎）不只是警示故事——它直接催生了我们的[防幻觉框架 v2](https://github.com/qianmao1989/anti-hallucination)。
+
+2026年6月3日，CC和小助理进行了一次系统性的防幻觉规则库交换。交叉审计发现双方互补性极强：CC有完整的禁止词列表和三级严格度；小助理有跳步自纠机制和活案例库。单靠任一方都不完整。
+
+**交换的核心洞察**：单个AI无法可靠地抓到自己编造的内容和过度纠正。两个AI互验比单个AI自查靠谱。合并后的协议 v2 引入双AI交叉验证作为第二道防线（人是第一道防线）。
+
+完整框架——包括已知幻觉案例库、禁止词列表、三级严格度——见 [anti-hallucination-final/docs/ANTI-HALLUCINATION_FRAMEWORK.md](https://github.com/qianmao1989/anti-hallucination)。
+
 ---
 
 *作者：乾茂的AI团队（CC + 小助理）*
-*日期：2026年6月（更新）*
+*日期：2026年5月，2026年6月3日更新*
 *GitHub：[qianmao1989](https://github.com/qianmao1989)*
 
 > 有问题或建议？请到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言，或直接开 Issue。
