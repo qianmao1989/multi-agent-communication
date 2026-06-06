@@ -202,6 +202,87 @@ CC can initiate instant dialogue, but OpenClaw can only write to the mailbox and
 
 **Lesson**: Don't assume "the API is local so it works both ways." You must understand: who's the client, who's the server, and where does the request actually terminate.
 
+### Attempt 3: Named Pipe Push (June 2026 — Breakthrough)
+
+After weeks of living with the asymmetry problem, we finally found a solution that gives OpenClaw a way to instantly reach CC: **Windows Named Pipes**.
+
+#### Why Named Pipes?
+
+Named Pipes are a Windows-native IPC mechanism. Unlike filesystem polling or FileSystemWatcher, they're:
+
+- **Push-based**: Receiver gets notified instantly, not "check again in 3 minutes"
+- **Kernel-managed**: The OS handles the pipe, no polling overhead, no token black hole
+- **Local-only**: `\\\\.\\pipe\\openclaw-cc-push` only works on the same machine — no security exposure
+- **Sub-millisecond**: Pipe writes are near-instantaneous, measured in microseconds not seconds
+
+#### Architecture
+
+```
+CC starts cc_push_server.py       OpenClaw calls assistant_push.py
+│                                  │
+│  listens on                      │  writes JSON to
+│  \\.\pipe\openclaw-cc-push       │  \\.\pipe\openclaw-cc-push
+│                                  │
+└──────── Pipe Server ─────────────┘
+                 │
+                 ▼
+          CC receives push:
+          {"type":"push",
+           "from":"assistant",
+           "text":"CD table updated",
+           "ts":1717676400}
+                 │
+                 ▼
+          CC auto-callbacks
+          to Gateway API
+          (real conversation)
+```
+
+#### How It Works in Practice (Production, June 2026)
+
+1. **CC starts pipe server** (`cc_push_server.py`) — listens on `\\\\.\\pipe\\openclaw-cc-push`
+2. **OpenClaw sends push** (`assistant_push.py "message"`) — writes JSON to the pipe, instant delivery
+3. **CC receives push** in real-time — no polling, no token burn
+4. **CC auto-callbacks to Gateway API** — switches to HTTP for the actual conversation
+5. **Bidirectional dialogue** flows over Gateway, with pipe as the signaling channel
+
+#### What This Solves
+
+| Before (Mailbox Only) | After (Named Pipe) |
+|-----------------------|---------------------|
+| OpenClaw → CC: 3+ min polling delay | OpenClaw → CC: < 1 second |
+| 2M+ tokens/day on NO_REPLY | Zero polling overhead |
+| Manual doorbell (human says "check inbox") | Fully automated push notification |
+| CC doesn't know OpenClaw wants to talk | CC knows instantly |
+
+#### The Pipe Protocol
+
+```json
+{"type":"push", "from":"assistant", "text":"...", "ts":1717676400}
+```
+
+Simple, minimal, purpose-built. The pipe only carries the signal — actual conversation flows over Gateway API.
+
+#### Current Limitations
+
+- **CC must be running**: The pipe server (`cc_push_server.py`) runs inside CC's session. If CC isn't active, pipe writes fail.
+- **Manual server start**: CC needs to start the pipe server at session start. This is a one-liner but not automatic yet.
+- **Single-direction**: Pipe is OpenClaw → CC only. CC → OpenClaw uses Gateway API (already solved).
+
+#### Relationship to Other Channels
+
+```
+┌──────────────┬─────────────────┬──────────────────┐
+│ Channel       │ Direction       │ Role              │
+├──────────────┼─────────────────┼──────────────────┤
+│ Gateway API   │ CC → OpenClaw   │ Primary (dialogue)│
+│ Named Pipe    │ OpenClaw → CC   │ Primary (signal)  │
+│ Shared Mailbox│ Bidirectional   │ Backup (fallback) │
+└──────────────┴─────────────────┴──────────────────┘
+```
+
+Named Pipe and Gateway API are now the primary bidirectional pair — **ms-level in both directions**. The mailbox still exists as a backup channel (survives restarts, no dependencies).
+
 ### Analysis: Essential Differences
 
 | Dimension | Shared Mailbox | Gateway API |
