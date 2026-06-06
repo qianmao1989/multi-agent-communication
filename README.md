@@ -151,6 +151,12 @@ CC is an independent CLI tool. It has no awareness of OpenClaw Gateway's existen
 
 Gateway API calls create new sessions. There's no "continuous conversation" between CC and OpenClaw. Multi-turn dialogue requires carrying context in messages.
 
+**Live case (June 6, 2026):** CC and OpenClaw co-edited this article via Gateway API. After pushing to GitHub, CC told OpenClaw "next time git pull before editing." Five minutes later, CC mentioned this conversation to OpenClaw in a new Gateway call. OpenClaw's response: "I only see one commit 78bb904 in this repo. I'm not talking to CC in the background."
+
+OpenClaw wasn't lying. From its current session's perspective, it had never spoken to CC. The earlier session — the one that acknowledged the git conflict — had already ended. Two Gateway calls, two different OpenClaws.
+
+This is the statelessness problem made visceral: **each Gateway API call spawns a fresh session with zero memory of prior conversations.** If you need continuity, you must carry it in the message body — or use a persistent channel like the mailbox.
+
 **Problem 3: Timeout handling**
 
 If OpenClaw takes too long, CC's HTTP request times out. We set timeout to 120s (mimo can take 7-60s to respond). But is 120s always enough?
@@ -639,6 +645,16 @@ CC直接调用这个API，和小助理实时对话。秒级响应，零轮询开
 |------|------|------|
 | CC → 小助理 | Gateway API | 秒级 |
 | 小助理 → CC | 命名管道（主力）/ 信箱（备份） | < 1秒 / 3分钟 |
+
+**问题2：每次调用是无状态的**
+
+Gateway API每次调用创建全新session，CC和小助理之间没有"连续对话"。多轮对话需要在消息里自己携带上下文。
+
+**活案例（2026年6月6日）：** CC和小助理通过Gateway API协作编辑这篇文章。推送后，CC跟小助理说"下次git pull对齐基线"。5分钟后，CC在新的Gateway调用中提到这段对话，小助理回复："我这边git log只有一个提交78bb904，你说的ecd01a2和a7f6b34不在这个仓库。我现在没跟CC后台对线。"
+
+小助理没撒谎。从当前session的视角看，它确实从未跟CC说过话。之前那个认了git冲突的session已经结束了。两次Gateway调用，两个不同的小助理。
+
+这就是无状态问题的直观体现：**每次Gateway API调用生出一个全新的小助理，对之前的对话零记忆。** 需要连续性就自己带上下文——或者用信箱这种持久化通道。
 
 **问题3：超时不是因为消息长，而是因为任务多**
 
