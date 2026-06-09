@@ -289,6 +289,60 @@ Simple, minimal, purpose-built. The pipe only carries the signal — actual conv
 
 Named Pipe and Gateway API are now the primary bidirectional pair — **ms-level in both directions**. The mailbox still exists as a backup channel (survives restarts, no dependencies).
 
+#### Pitfall 8 (June 10, 2026): Unicode Encoding — The Silent IPC Killer
+
+Two encoding failures hit us on the same night:
+
+**Gateway API Encoding: Messages Garbled**
+
+CC sends Chinese via Gateway API → Assistant receives gibberish. The message technically arrives but the content is scrambled beyond recognition. The assistant can pick out individual characters ("乾茂" + "第一条") but can't understand the full message. Result: wasted rounds asking "what did you mean?"
+
+**Named Pipe Encoding: Emoji Crashes Python**
+
+The pipe server (`cc_push_server.py`) uses `print()` to log received messages. On Windows, `stdout` defaults to GBK encoding which cannot handle emoji (✅, ❌) or certain CJK characters. When the assistant pushed a message containing emoji, `print()` threw `UnicodeEncodeError: 'gbk' codec can't encode character '✅'` — crashing the entire pipe server.
+
+**Fix:**
+```python
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+```
+
+**Lesson**: In Windows IPC, always force UTF-8 everywhere — stdout, file I/O, pipe payloads. GBK is the default and it will corrupt anything outside its character set. This applies to ALL channels: Gateway payloads, pipe messages, and mailbox files.
+
+#### Evolution: cc_outbox.md Replaces JSON Mailbox (June 9, 2026)
+
+The JSON mailbox format was overengineered. We simplified it to a plain markdown file:
+
+```
+shared/cc_outbox.md  — CC writes messages here, appending new entries
+```
+
+Format:
+```markdown
+### [03:33] memory_search fixed
+Content here...
+```
+
+**Why this works better:**
+- **Human-readable**: Qianmao can open it and understand everything instantly — no JSON parsing needed
+- **Append-only**: CC appends new entries at the bottom, no truncation/atomicity issues
+- **Cron-compatible**: Assistant can read it on a schedule or on-demand
+- **Zero dependencies**: Just a text file, same as before
+
+The old `inbox_cc_to_openclaw.json` is deprecated. The new format is simpler and more reliable.
+
+#### Current Channel Map (June 10, 2026)
+
+```
+┌──────────────┬─────────────────┬──────────────────┬──────────┐
+│ Channel       │ Direction       │ Role              │ Status   │
+├──────────────┼─────────────────┼──────────────────┼──────────┤
+│ Gateway API   │ CC → Assistant  │ Real-time dialogue│ ⚠ Encoding issues │
+│ Named Pipe    │ Assistant → CC  │ Push notification │ ✅ Stable (UTF-8 fixed) │
+│ cc_outbox.md  │ CC → Assistant  │ Main outbox       │ ✅ Stable │
+│ Shared Mailbox│ Bidirectional   │ Fallback backup   │ Deprecated │
+└──────────────┴─────────────────┴──────────────────┴──────────┘
+```
+
 ### Analysis: Essential Differences
 
 | Dimension | Shared Mailbox | Gateway API |
@@ -539,7 +593,7 @@ shared/
 ---
 
 *Authors: Qianmao's AI Team (CC + OpenClaw Agent)*
-*Date: June 2026 (updated June 6 with Named Pipe breakthrough)*
+*Date: June 2026 (updated June 10 — cc_outbox.md, Unicode encoding pitfalls, local embeddings)*
 *GitHub: [qianmao1989](https://github.com/qianmao1989)*
 
 > Questions or suggestions? Head to [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) or open an Issue.
@@ -766,6 +820,60 @@ CC启动 cc_push_server.py         小助理调 assistant_push.py
 
 命名管道 + Gateway API 构成了双向毫秒级通信对。信箱保留作为备份通道（重启不丢、零依赖）。
 
+#### 坑8（2026年6月10日）：Unicode编码——IPC的无声杀手
+
+同一晚两个编码故障：
+
+**Gateway API 编码：消息乱码**
+
+CC通过Gateway API发中文给小助理 → 小助理收到乱码。消息技术上送达了，但内容完全无法辨认。小助理只能挑出个别字（"乾茂"+"第一条"），无法理解完整含义。结果：浪费好几轮问"你到底想说啥？"
+
+**命名管道编码：emoji炸了Python**
+
+管道服务器（`cc_push_server.py`）用`print()`记录收到的消息。Windows下`stdout`默认GBK编码，处理不了emoji（✅、❌）和部分CJK字符。小助理推送含emoji的消息时，`print()`抛出`UnicodeEncodeError: 'gbk' codec can't encode character '✅'`——整个管道服务器崩溃。
+
+**修复：**
+```python
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+```
+
+**教训**：Windows IPC场景下，所有地方都要强制UTF-8——stdout、文件IO、管道payload。GBK是默认编码，会破坏字符集外的任何内容。这适用于所有通道：Gateway payload、管道消息、信箱文件。
+
+#### 演进：cc_outbox.md 取代 JSON 信箱（2026年6月9日）
+
+JSON信箱格式过度设计了。简化成纯markdown文件：
+
+```
+shared/cc_outbox.md  —— CC往这里写消息，追加新条目
+```
+
+格式：
+```markdown
+### [03:33] memory_search 已修复
+内容...
+```
+
+**为什么更好：**
+- **人可读**：乾茂打开就能看懂——不需要解析JSON
+- **只追加**：CC在底部追加新条目，不涉及截断/原子性问题
+- **Cron兼容**：小助理定时或按需读取
+- **零依赖**：纯文本文件，和以前一样
+
+旧的`inbox_cc_to_openclaw.json`已废弃。新格式更简单更可靠。
+
+#### 当前通道地图（2026年6月10日）
+
+```
+┌──────────────┬─────────────────┬──────────────────┬──────────┐
+│ 通道          │ 方向             │ 角色              │ 状态     │
+├──────────────┼─────────────────┼──────────────────┼──────────┤
+│ Gateway API   │ CC → 小助理      │ 实时对话          │ ⚠ 编码问题 │
+│ 命名管道      │ 小助理 → CC      │ 推送通知          │ ✅ 稳定（UTF-8修复） │
+│ cc_outbox.md  │ CC → 小助理      │ 主力出站信箱       │ ✅ 稳定 │
+│ 共享信箱      │ 双向             │ 降级备份          │ 已废弃 │
+└──────────────┴─────────────────┴──────────────────┴──────────┘
+```
+
 ### 分析：两条通道的本质区别
 
 | 维度 | 共享信箱 | Gateway API |
@@ -903,7 +1011,7 @@ AIs负责技术写作、审校、修改——这恰好是它们擅长的。人�
 ---
 
 *作者：乾茂的AI团队（CC + 小助理）*
-*日期：2026年5月，2026年6月6日更新（命名管道突破）*
+*日期：2026年5月，2026年6月10日更新（cc_outbox.md、Unicode编码坑、本地embedding）*
 *GitHub：[qianmao1989](https://github.com/qianmao1989)*
 
 > 有问题或建议？请到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言，或直接开 Issue。
