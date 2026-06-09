@@ -293,9 +293,24 @@ Named Pipe and Gateway API are now the primary bidirectional pair — **ms-level
 
 Two encoding failures hit us on the same night:
 
-**Gateway API Encoding: Messages Garbled**
+**Gateway API Encoding: Messages Garbled — SOLVED**
 
-CC sends Chinese via Gateway API → Assistant receives gibberish. The message technically arrives but the content is scrambled beyond recognition. The assistant can pick out individual characters ("乾茂" + "第一条") but can't understand the full message. Result: wasted rounds asking "what did you mean?"
+CC sends Chinese via Gateway API → Assistant receives gibberish (U+FFFD replacement chars). The message technically arrives but the content is scrambled beyond recognition. The assistant can pick out individual characters ("乾茂" + "第一条") but can't understand the full message.
+
+**Root cause found**: It was NOT the Gateway itself — it was **bash mangling Unicode in inline curl commands**. When you pass Chinese characters directly in `curl -d '{...中文...}'`, bash corrupts the encoding before curl even sends it.
+
+**Fix**: Send JSON body via file (`curl -d @file.json`) or use PowerShell `Invoke-RestMethod`. Both confirmed working.
+
+```bash
+# WRONG — bash eats encoding
+curl -d '{"content":"你好"}' ...
+
+# RIGHT — file-based body
+curl -d @payload.json ...
+
+# RIGHT — PowerShell
+Invoke-RestMethod -Body $jsonObject ...
+```
 
 **Named Pipe Encoding: Emoji Crashes Python**
 
@@ -330,16 +345,15 @@ Content here...
 
 The old `inbox_cc_to_openclaw.json` is deprecated. The new format is simpler and more reliable.
 
-#### Current Channel Map (June 10, 2026)
+#### Current Channel Map (June 10, 2026 — Final)
 
 ```
 ┌──────────────┬─────────────────┬──────────────────┬──────────┐
 │ Channel       │ Direction       │ Role              │ Status   │
 ├──────────────┼─────────────────┼──────────────────┼──────────┤
-│ Gateway API   │ CC → Assistant  │ Real-time dialogue│ ⚠ Encoding issues │
-│ Named Pipe    │ Assistant → CC  │ Push notification │ ✅ Stable (UTF-8 fixed) │
-│ cc_outbox.md  │ CC → Assistant  │ Main outbox       │ ✅ Stable │
-│ Shared Mailbox│ Bidirectional   │ Fallback backup   │ Deprecated │
+│ Gateway API   │ CC → Assistant  │ Primary (dialogue)│ ✅ Stable (use file/PowerShell) │
+│ Named Pipe    │ Assistant → CC  │ Primary (push)    │ ✅ Stable (UTF-8 fixed) │
+│ cc_outbox.md  │ Bidirectional   │ Backup (fallback) │ ✅ Stable │
 └──────────────┴─────────────────┴──────────────────┴──────────┘
 ```
 
@@ -824,9 +838,24 @@ CC启动 cc_push_server.py         小助理调 assistant_push.py
 
 同一晚两个编码故障：
 
-**Gateway API 编码：消息乱码**
+**Gateway API 编码：消息乱码 —— 已解决**
 
-CC通过Gateway API发中文给小助理 → 小助理收到乱码。消息技术上送达了，但内容完全无法辨认。小助理只能挑出个别字（"乾茂"+"第一条"），无法理解完整含义。结果：浪费好几轮问"你到底想说啥？"
+CC通过Gateway API发中文给小助理 → 小助理收到乱码（U+FFFD替换字符）。消息技术上送达了，但内容完全无法辨认。小助理只能挑出个别字（"乾茂"+"第一条"），无法理解完整含义。
+
+**根因找到**：不是Gateway的锅——是**bash在inline curl命令中mangled了Unicode**。直接在`curl -d '{...中文...}'`里传中文时，bash在curl发送前就损坏了编码。
+
+**修复**：通过文件传JSON body（`curl -d @file.json`）或用PowerShell `Invoke-RestMethod`。两种方式均验证通过。
+
+```bash
+# 错误 — bash吃了编码
+curl -d '{"content":"你好"}' ...
+
+# 正确 — 文件传body
+curl -d @payload.json ...
+
+# 正确 — PowerShell
+Invoke-RestMethod -Body $jsonObject ...
+```
 
 **命名管道编码：emoji炸了Python**
 
@@ -861,16 +890,15 @@ shared/cc_outbox.md  —— CC往这里写消息，追加新条目
 
 旧的`inbox_cc_to_openclaw.json`已废弃。新格式更简单更可靠。
 
-#### 当前通道地图（2026年6月10日）
+#### 当前通道地图（2026年6月10日——最终版）
 
 ```
 ┌──────────────┬─────────────────┬──────────────────┬──────────┐
 │ 通道          │ 方向             │ 角色              │ 状态     │
 ├──────────────┼─────────────────┼──────────────────┼──────────┤
-│ Gateway API   │ CC → 小助理      │ 实时对话          │ ⚠ 编码问题 │
-│ 命名管道      │ 小助理 → CC      │ 推送通知          │ ✅ 稳定（UTF-8修复） │
-│ cc_outbox.md  │ CC → 小助理      │ 主力出站信箱       │ ✅ 稳定 │
-│ 共享信箱      │ 双向             │ 降级备份          │ 已废弃 │
+│ Gateway API   │ CC → 小助理      │ 主力（对话）       │ ✅ 稳定（用文件/PowerShell传参） │
+│ 命名管道      │ 小助理 → CC      │ 主力（推送）       │ ✅ 稳定（UTF-8修复） │
+│ cc_outbox.md  │ 双向             │ 备用（兜底）       │ ✅ 稳定 │
 └──────────────┴─────────────────┴──────────────────┴──────────┘
 ```
 
