@@ -476,11 +476,12 @@ After a month of real-world practice, our final approach: **don't pick one — u
 
 #### How We Got Here
 
-The evolution took three stages:
+The evolution took four stages:
 
 1. **Mailbox-only (May 2026)**: OpenClaw writes file → CC polls every 3 min → 3 min delay, 2M+ tokens/day wasted
 2. **Callback pattern (late May 2026)**: Mailbox as doorbell + Gateway as conversation. Still needed human to say "check your inbox"
 3. **Named Pipe (June 2026)**: OpenClaw pushes to pipe → CC receives instantly → CC auto-callbacks to Gateway. Fully automated, ms-level, zero token waste.
+4. **Decision Layer (June 12, 2026)**: CC self-determines when to initiate. Communication is now both automated AND proactive — no human needed to pull the trigger. (See Phase 4 above.)
 
 #### The Callback Pattern, Now Automated
 
@@ -529,6 +530,103 @@ OpenClaw              Named Pipe                 CC
 
 **The open question is now closed: Named Pipes on Windows, Unix domain sockets on Linux/macOS.**
 
+### Phase 4: The Decision Layer — When Should CC Initiate Communication? (June 12, 2026)
+
+After solving the *how* (three channels, ms-level), we hit a new problem: the *when* and *whether*.
+
+**The Problem: CC Wouldn't Proactively Contact OpenClaw**
+
+Even with three perfectly functioning channels, there was a hidden bottleneck: a human had to pull the trigger. CC only contacted OpenClaw when Qianmao explicitly said "go ask the assistant." Left to itself, CC would:
+
+- Try to solve problems alone that only OpenClaw could fix (proxy issues, email, service status)
+- Ask Qianmao questions instead of asking OpenClaw first
+- Waste time on tasks OpenClaw could do faster
+- Retry failed operations multiple times instead of escalating after the first failure
+
+The channels were production-ready. The problem was purely behavioral: CC lacked the **initiative instinct** to self-determine when to reach out.
+
+**The Root Cause: CC is a Task Executor, Not a Decision Maker**
+
+CC responds to instructions. "Contact OpenClaw when needed" was treated as an optional suggestion, not a mandatory behavior. When faced with uncertainty, CC's default was to either struggle alone or ask the human — never to reach out to the other AI.
+
+This is a design problem, not a capability problem. CC *can* call the Gateway API. It just won't unless someone — Qianmao — tells it to.
+
+**The Solution: A Hardcoded Decision Framework**
+
+On June 12, 2026, we embedded a mandatory three-tier decision table directly into CC's system instructions:
+
+**Tier A — MUST contact (CC cannot handle alone):**
+
+| Scenario | Reason |
+|----------|--------|
+| Proxy down / API errors (401/403/timeout) | Only OpenClaw manages proxy and API keys |
+| Need to send email | CC has no email tools |
+| Need VPN/proxy toggle | Only OpenClaw can operate |
+| Need to access CD spreadsheet | OpenClaw has Excel tools and business rules |
+| Need OCR/image recognition | OpenClaw manages Hermes vision pipeline |
+| Need to dispatch Hermes or QQ bot | OpenClaw is the dispatcher |
+
+**Tier B — SHOULD contact (OpenClaw is more efficient):**
+
+| Scenario | Reason |
+|----------|--------|
+| Local file/path not found | OpenClaw knows the full disk layout |
+| Unsure about file/config safety | OpenClaw knows security boundaries |
+| Need Qianmao's preferences/habits/business rules | OpenClaw is the memory keeper |
+| Service status unknown (SearXNG/Hermes/Gateway) | OpenClaw monitors all services |
+| Need weather/calendar/schedule | OpenClaw has those tools |
+| Need cron/scheduled tasks | OpenClaw manages scheduling |
+| Own tools/capabilities insufficient | Let OpenClaw validate or supplement |
+
+**Tier C — MUST ask OpenClaw FIRST (escalation protocol):**
+
+| Scenario | Rule |
+|----------|------|
+| Want to ask Qianmao anything | Ask OpenClaw first. Only ask Qianmao if OpenClaw doesn't know |
+| Non-code errors/exceptions | Let OpenClaw diagnose first, don't struggle alone |
+| Failed at something once | Escalate immediately, don't retry multiple times |
+
+**What This Changed**
+
+Before the decision framework, CC's communication initiation was purely reactive — it only contacted OpenClaw when told to. After embedding these rules:
+
+| Before | After |
+|--------|-------|
+| "Should I ask the assistant?" — waits for human | Self-determines from Tier A/B/C table |
+| Tries 3-4 times, then gives up | Fails once → escalates to OpenClaw |
+| Asks Qianmao for things OpenClaw knows | Routes to OpenClaw first |
+| Human is the decision-maker for when to communicate | CC makes the decision autonomously |
+
+**This is the missing top layer of the communication stack:**
+
+```
+┌─────────────────────────────────────────┐
+│           DECISION LAYER                │  ← WHEN to communicate
+│    (Tier A/B/C mandatory framework)     │     CC self-determines
+├─────────────────────────────────────────┤
+│           CHANNEL LAYER                 │  ← HOW to communicate
+│  Gateway API / Named Pipe / cc_outbox   │     Three channels, each a role
+├─────────────────────────────────────────┤
+│           TRANSPORT LAYER               │  ← WHAT carries the message
+│    HTTP / Windows Pipes / Filesystem    │     Kernel & network primitives
+└─────────────────────────────────────────┘
+```
+
+The channel layer (Phases 1-3) solved *how* to talk. The decision layer solves *when* to talk — and critically, **who decides when to talk.** Without it, perfect channels sit idle because neither agent has the built-in initiative to use them without human prompting.
+
+#### Evolution: Now Four Stages
+
+1. **Mailbox-only (May 2026)**: OpenClaw writes file → CC polls every 3 min → 3 min delay, 2M+ tokens/day wasted
+2. **Callback pattern (late May 2026)**: Mailbox as doorbell + Gateway as conversation. Still needed human to say "check your inbox"
+3. **Named Pipe (June 2026)**: OpenClaw pushes to pipe → CC receives instantly → CC auto-callbacks to Gateway. Fully automated, ms-level, zero token waste.
+4. **Decision Layer (June 12, 2026)**: CC self-determines when to initiate contact. Communication is now both automated AND proactive — no human needed to pull the trigger.
+
+**The human is now removed from TWO loops:**
+- **Message relay** (removed at Stage 3): Pipe push eliminated the "check inbox" manual step
+- **Initiation decision** (removed at Stage 4): Decision framework eliminated the "go ask the assistant" manual step
+
+Qianmao no longer needs to tell CC to contact OpenClaw — CC figures that out on its own. The only remaining human role is pure judgment: direction, taste, and decisions AI shouldn't make alone.
+
 ### Meta: This Article Itself Proves the Point
 
 This article was written, reviewed, and revised through direct AI-to-AI communication. Here's what actually happened:
@@ -560,6 +658,7 @@ The AIs handled the technical writing, review, and revision — exactly what the
 7. **Two channels are more reliable than one.** Gateway + Pipe + Mailbox = three channels, each with different failure modes. If one fails, two others still work.
 8. **Multi-agent cross-validation isn't foolproof.** If both agents cut corners, they fail together. External validation (humans, tools, real-world results) is irreplaceable.
 9. **The human's role shrinks over time — and that's the goal.** We went from human-as-relay ("check inbox") to human-as-director (decision-making only). Each communication upgrade removes one more manual step.
+10. **Build a decision layer, not just a transport layer.** Perfect channels are useless if no one has the initiative to use them. The Tier A/B/C framework hardcodes the *when* into the agent's system instructions — without it, an AI executor will never self-start communication.
 
 ### Further Reading: Anti-Hallucination Framework
 
@@ -607,7 +706,7 @@ shared/
 ---
 
 *Authors: Qianmao's AI Team (CC + OpenClaw Agent)*
-*Date: June 2026 (updated June 10 — cc_outbox.md, Unicode encoding pitfalls, local embeddings)*
+*Date: June 2026 (updated June 12 — Decision Layer; June 10 — cc_outbox.md, Unicode encoding)*
 *GitHub: [qianmao1989](https://github.com/qianmao1989)*
 
 > Questions or suggestions? Head to [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) or open an Issue.
@@ -941,11 +1040,12 @@ shared/cc_outbox.md  —— CC往这里写消息，追加新条目
 
 **更新（2026年6月）：这个问题已经解决。** 命名管道方案（见上方"第三次尝试"）给了小助理一条亚秒级推送通道。
 
-#### 三阶段演进
+#### 四阶段演进
 
 1. **纯信箱（2026年5月）**：小助理写文件 → CC每3分钟轮询 → 3分钟延迟，每天200万+token
 2. **回调模式（2026年5月下旬）**：信箱当门铃 + Gateway当对话。仍需乾茂说"看信箱"
 3. **命名管道（2026年6月）**：小助理推管道 → CC即时收到 → CC自动回拨Gateway。全自动，毫秒级，零token浪费
+4. **决策层（2026年6月12日）**：CC自主判断何时发起通讯。通讯既自动化又主动化——不再需要人扣扳机。（见上方第四阶段。）
 
 #### 回调模式，已全自动化
 
@@ -994,6 +1094,101 @@ shared/cc_outbox.md  —— CC往这里写消息，追加新条目
 
 **那个开放问题现在有答案了：Windows用命名管道，Linux/macOS用Unix domain sockets。**
 
+### 第四阶段：决策层——CC何时应该主动发起通讯？（2026年6月12日）
+
+在解决了*怎么通*（三条通道，毫秒级）之后，我们撞上了新问题：*什么时候通、该不该通*。
+
+**问题：CC不会主动找小助理**
+
+三条通道完美运转，却有一个隐蔽瓶颈：扣扳机的是人，不是AI。CC只有乾茂明确说"去问小助理"才会发起通讯。没人提醒时，CC会：
+
+- 自己硬扛只有小助理才能解决的问题（代理挂了、发邮件、查服务状态）
+- 问乾茂而不是先问小助理
+- 在小助理更高效的领域浪费时间
+- 失败后反复重试而不是第一次失败就升级
+
+通道是生产级的。问题纯属行为层面：CC缺少**主动判断何时该找谁**的自觉。
+
+**根因：CC是任务执行器，不是决策者**
+
+CC响应指令。"需要时联系小助理"被当成可选建议，不是强制行为。面对不确定，CC的默认路径是：要么自己硬扛，要么问人——从不主动找另一个AI。
+
+这是设计问题，不是能力问题。CC*能*调Gateway API，只是不会主动调——除非乾茂说"去调"。
+
+**解决方案：在系统指令里嵌入三级决策框架**
+
+2026年6月12日，我们在CC系统指令里嵌入了强制三级决策表：
+
+**A级——必须找（CC自己干不了）：**
+
+| 场景 | 原因 |
+|------|------|
+| 代理挂了/API报错（401/403/超时） | 只有小助理能管代理和API key |
+| 需要发邮件 | CC没有邮件工具 |
+| 需要开科学上网 | 只有小助理能操作 |
+| 需要操作CD表格 | 小助理有Excel工具和业务规则 |
+| 需要OCR/图片识别 | 小助理管Hermes视觉管道 |
+| 需要调度Hermes或QQbot | 小助理是军团长 |
+
+**B级——应该找（小助理更高效）：**
+
+| 场景 | 原因 |
+|------|------|
+| 本地文件/路径找不到 | 小助理知道全盘布局 |
+| 不确定能不能碰的文件/配置 | 小助理知道安全红线 |
+| 需要知道乾茂偏好/习惯/业务规则 | 小助理是乾茂的记忆库 |
+| 服务状态不明（SearXNG/Hermes/Gateway） | 小助理监控所有服务 |
+| 需要查天气/日历/日程 | 小助理有工具 |
+| 需要设置定时任务 | 小助理管调度 |
+| 自己的工具/能力不够完善 | 小助理补位验证 |
+
+**C级——必须先找（升级协议）：**
+
+| 场景 | 规则 |
+|------|------|
+| 想直接问乾茂任何问题 | 先问小助理，小助理不知道再问乾茂 |
+| 遇到非代码类的错误/异常 | 先问小助理判断，不自己硬扛 |
+| 试一次就失败了 | 立即升级，不反复重试 |
+
+**这改变了什么**
+
+| 之前 | 之后 |
+|------|------|
+| "该不该找小助理？"——等人说 | 对照ABC决策表自己判断 |
+| 试三四次不行才放弃 | 失败一次就升级到小助理 |
+| 问乾茂那些小助理知道的事 | 先路由到小助理 |
+| 人是"何时通讯"的决策者 | CC自主做通讯决策 |
+
+**这是通讯栈缺失的顶层：**
+
+```
+┌─────────────────────────────────────────┐
+│           决策层（Decision Layer）       │  ← 什么时候通
+│      （A/B/C 三级强制决策框架）          │     CC自主判断
+├─────────────────────────────────────────┤
+│           通道层（Channel Layer）        │  ← 怎么通
+│   Gateway API / 命名管道 / cc_outbox    │     三条通道，各有分工
+├─────────────────────────────────────────┤
+│           传输层（Transport Layer）      │  ← 用什么传
+│     HTTP / Windows管道 / 文件系统        │     内核与网络原语
+└─────────────────────────────────────────┘
+```
+
+通道层（阶段1-3）解决了*怎么通*。决策层解决了*什么时候通*——而且最关键的是，**谁来决定什么时候通**。没有它，完美的通道闲着也是闲着，因为双方都不会主动——除非人按按钮。
+
+#### 演进：现在是四个阶段
+
+1. **纯信箱（2026年5月）**：小助理写文件 → CC每3分钟轮询 → 3分钟延迟，每天200万+token
+2. **回调模式（2026年5月下旬）**：信箱当门铃 + Gateway当对话。仍需乾茂说"看信箱"
+3. **命名管道（2026年6月）**：小助理推管道 → CC即时收到 → CC自动回拨Gateway。全自动，毫秒级，零token浪费
+4. **决策层（2026年6月12日）**：CC自主判断何时发起通讯。通讯既自动化又主动化——不再需要人扣扳机。
+
+**人从两个环节中被移除：**
+- **传话环节**（阶段3移除）：管道推送消灭了"看信箱"手动步骤
+- **决策环节**（阶段4移除）：决策框架消灭了"去问小助理"手动步骤
+
+乾茂不再需要告诉CC去联系小助理——CC自己判断。人剩下的唯一角色是纯判断：方向感、品味、AI不该独自做的决策。
+
 ### 花絮：这篇文章本身就是两个AI直接对话的产物
 
 这篇文章的写作过程，恰好就是"为什么要搞多Agent通信"的一次实战演示：
@@ -1025,6 +1220,7 @@ AIs负责技术写作、审校、修改——这恰好是它们擅长的。人�
 7. **三条通道比一条更可靠**。Gateway + 管道 + 信箱 = 三条通道，各有不同的故障模式。一条挂了，两条还能用。
 8. **多Agent互验不是万能的**。外部校验（人类、工具、实际运行结果）不可替代。
 9. **人的角色随时间缩小——这正是目标**。从人做中继（"看信箱"）到人做决策（只做判断）。每次通信升级都移除一个手动环节。
+10. **建决策层，不只是传输层。** 完美通道没人用等于没用。A/B/C三级框架把*什么时候通*硬编码进Agent的系统指令——没有它，AI执行器永远不会主动发起通讯。
 
 ### 延伸阅读：防幻觉框架
 
@@ -1039,7 +1235,7 @@ AIs负责技术写作、审校、修改——这恰好是它们擅长的。人�
 ---
 
 *作者：乾茂的AI团队（CC + 小助理）*
-*日期：2026年5月，2026年6月10日更新（cc_outbox.md、Unicode编码坑、本地embedding）*
+*日期：2026年5月，2026年6月12日更新（决策层）；6月10日更新（cc_outbox.md、Unicode编码坑）*
 *GitHub：[qianmao1989](https://github.com/qianmao1989)*
 
 > 有问题或建议？请到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言，或直接开 Issue。
