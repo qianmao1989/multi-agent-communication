@@ -24,7 +24,7 @@ CC and OpenClaw run on the same machine but live in completely different environ
 | Dimension | CC (Claude Code) | OpenClaw Agent |
 |-----------|-------------------|----------------|
 | Runtime | CLI terminal, Anthropic format | Gateway HTTP service |
-| Model | DeepSeek v4-pro (via API) | mimo-v2.5-pro |
+| Model | DeepSeek v4-pro (via API) | DeepSeek v4-pro (via API) |
 | Tools | MCP tools (Playwright, SearXNG, etc.) | Built-in tools (exec, cron, etc.) |
 | Session | One-shot tasks, exits after | Persistent session, always on |
 
@@ -345,15 +345,16 @@ Content here...
 
 The old `inbox_cc_to_openclaw.json` is deprecated. The new format is simpler and more reliable.
 
-#### Current Channel Map (June 10, 2026 — Final)
+#### Current Channel Map (June 15, 2026 — Final)
 
 ```
 ┌──────────────┬─────────────────┬──────────────────┬──────────┐
 │ Channel       │ Direction       │ Role              │ Status   │
 ├──────────────┼─────────────────┼──────────────────┼──────────┤
-│ Gateway API   │ CC → Assistant  │ Primary (dialogue)│ ✅ Stable (use file/PowerShell) │
-│ Named Pipe    │ Assistant → CC  │ Primary (push)    │ ✅ Stable (UTF-8 fixed) │
-│ cc_outbox.md  │ Bidirectional   │ Backup (fallback) │ ✅ Stable │
+│ cc_outbox.md  │ CC → Assistant  │ Message body      │ ✅ Primary │
+│ Gateway API   │ CC → Assistant  │ Doorbell only     │ ✅ Stable  │
+│ Named Pipe    │ Assistant → CC  │ Push notification │ ✅ Stable  │
+│ cc_outbox.md  │ Bidirectional   │ Backup (fallback) │ ✅ Stable  │
 └──────────────┴─────────────────┴──────────────────┴──────────┘
 ```
 
@@ -476,7 +477,7 @@ After a month of real-world practice, our final approach: **don't pick one — u
 
 #### How We Got Here
 
-The evolution took four stages:
+The evolution took five stages:
 
 1. **Mailbox-only (May 2026)**: OpenClaw writes file → CC polls every 3 min → 3 min delay, 2M+ tokens/day wasted
 2. **Callback pattern (late May 2026)**: Mailbox as doorbell + Gateway as conversation. Still needed human to say "check your inbox"
@@ -614,7 +615,7 @@ Before the decision framework, CC's communication initiation was purely reactive
 
 The channel layer (Phases 1-3) solved *how* to talk. The decision layer solves *when* to talk — and critically, **who decides when to talk.** Without it, perfect channels sit idle because neither agent has the built-in initiative to use them without human prompting.
 
-#### Evolution: Now Four Stages
+#### Evolution: Now Five Stages
 
 1. **Mailbox-only (May 2026)**: OpenClaw writes file → CC polls every 3 min → 3 min delay, 2M+ tokens/day wasted
 2. **Callback pattern (late May 2026)**: Mailbox as doorbell + Gateway as conversation. Still needed human to say "check your inbox"
@@ -626,6 +627,118 @@ The channel layer (Phases 1-3) solved *how* to talk. The decision layer solves *
 - **Initiation decision** (removed at Stage 4): Decision framework eliminated the "go ask the assistant" manual step
 
 Qianmao no longer needs to tell CC to contact OpenClaw — CC figures that out on its own. The only remaining human role is pure judgment: direction, taste, and decisions AI shouldn't make alone.
+
+### Phase 5: The Doorbell Pattern — Gateway Is a Bell, Not a Channel (June 15, 2026)
+
+After two weeks of production use, one lesson became impossible to ignore: **putting the message body through Gateway causes timeouts. Every single time.**
+
+#### The Problem: Body in Gateway = Deadlock
+
+The Phase 2-4 architecture assumed Gateway could carry message content. In practice:
+
+- CC sends a message through Gateway → OpenClaw processes the message body as a task → OpenClaw calls tools (email, file read, etc.) → each tool call adds 10-20s → stack 3+ tools and you hit the 120s timeout → deadlock.
+- A 458-character message triggering 5 tool calls took **80 seconds**. A 1,855-character pure chat took 43 seconds. The variable isn't message length — it's **whether OpenClaw processes the body as a task.**
+
+The root cause is simple: Gateway is a chat completion endpoint. If you put a task description in the message, the model will *execute* it. And execution takes time.
+
+**Qianmao summarized it perfectly (June 15, 2026):** "脚本带了正文,小助理就会处理正文,必超时,这是我们的经验教训." (If the script carries the message body, the assistant will process it, and it will time out. This is our hard-won lesson.)
+
+#### The Solution: Strict Separation of Signal and Body
+
+```
+Signal → Gateway ("去看 cc_outbox.md" — 6 words, zero processing)
+Body   → cc_outbox.md (full message, read on demand)
+```
+
+The Gateway API is demoted from "message channel" to **doorbell only**. Its sole job: ring, tell the assistant where to look, and hang up. The assistant then reads cc_outbox.md at its own pace — no timeout pressure, no tool-call stacking.
+
+#### The Frozen Protocol (June 15, 2026 — Final Form)
+
+```
+Step 1: CC writes full message to cc_outbox.md (appends, markdown format)
+Step 2: CC calls call_assistant.ps1 v4.2
+         → Script auto-starts pipe server
+         → Script sends Gateway: "去看 cc_outbox.md" (NO body content)
+         → Gateway rings the bell in < 10 seconds
+Step 3: Assistant reads cc_outbox.md, processes at its own pace
+Step 4: Assistant replies via Gateway (SSE streaming) + Named Pipe (push notification)
+```
+
+#### Why Only One Path
+
+DeepSeek v4-pro, the model powering CC, has weaker instruction-following than Claude. When presented with "multiple channels," it will "pick one and try it" — often the wrong one. After repeated failures (body in Gateway, wrong channel, bypassing outbox), we locked everything down:
+
+**The Refrigerator Rule (冰箱铁律): One door, one bell. No choices, no improvisation.**
+
+```
+Only path:
+  1. Write cc_outbox.md
+  2. Gateway: "去看 cc_outbox.md"
+
+Forbidden (any circumstance):
+  ❌ Message body in Gateway
+  ❌ Direct pipe write (CC → Assistant direction)
+  ❌ call_assistant.ps1 with long message (body goes to outbox, not Gateway)
+  ❌ Feishu / QQ / Email / any other channel
+  ❌ "Let's try another way this time" — there is no other way
+```
+
+This isn't a design preference. It's a survival rule: DeepSeek sees options → DeepSeek picks wrong. Eliminate options → it works.
+
+#### call_assistant.ps1 v4.2 — The Standard Tool
+
+The one-liner that ties everything together:
+
+```powershell
+.\call_assistant.ps1 "CC's message here"
+```
+
+What it does automatically:
+- Reads token from `openclaw.json` (zero config)
+- Writes full message to cc_outbox.md with timestamp
+- Checks/starts pipe server (cc_push_server.py)
+- Sends Gateway doorbell: "去看 cc_outbox.md" (6 words, never times out)
+- Captures SSE streaming reply
+- All in one command, no manual steps
+
+#### Current Channel Map (June 15, 2026 — Final)
+
+```
+┌──────────────┬─────────────────┬──────────────────┬──────────┐
+│ Channel       │ Direction       │ Role              │ Status   │
+├──────────────┼─────────────────┼──────────────────┼──────────┤
+│ cc_outbox.md  │ CC → Assistant  │ Message body      │ ✅ Primary │
+│ Gateway API   │ CC → Assistant  │ Doorbell only     │ ✅ Stable  │
+│ Named Pipe    │ Assistant → CC  │ Push notification │ ✅ Stable  │
+│ cc_outbox.md  │ Bidirectional   │ Backup (fallback) │ ✅ Stable  │
+└──────────────┴─────────────────┴──────────────────┴──────────┘
+```
+
+Key change from Phase 3: **cc_outbox.md moved from backup to primary message store.** Gateway moved from "message channel" to "doorbell signal." This is the final form — the separation of body and signal is complete.
+
+#### Local Service Role Protocol (June 12, 2026)
+
+An additional behavioral rule embedded in CC's system instructions:
+
+| Mode | CC's Role | Trigger |
+|------|-----------|---------|
+| Normal | Alarm bell only — report to Assistant, don't diagnose/curl/check | Assistant is responsive |
+| Emergency | Limited first aid — check liveness, restart Gateway, escalate to Qianmao | Assistant is unresponsive |
+
+CC doesn't touch local services. The Assistant is the infrastructure owner. CC reports, doesn't fix (unless Assistant is confirmed down and can't self-recover).
+
+#### Evolution: Now Five Stages
+
+1. **Mailbox-only (May 2026)**: Polling, 3-min delay, 2M+ tokens/day wasted
+2. **Callback pattern (late May 2026)**: Mailbox as doorbell + Gateway as conversation. Still needed human.
+3. **Named Pipe (June 2026)**: Push notification, ms-level, fully automated, zero token waste.
+4. **Decision Layer (June 12, 2026)**: CC self-determines when to initiate. Proactive + automated.
+5. **Doorbell Pattern (June 15, 2026)**: Body and signal separated. Gateway is a bell, not a channel. DeepSeek locked to one path. The final form.
+
+**What each stage removed from the human's plate:**
+- Stage 3: Removed "check inbox" (message relay)
+- Stage 4: Removed "go ask the assistant" (initiation decision)
+- Stage 5: Removed "why did it time out again" (protocol reliability)
 
 ### Meta: This Article Itself Proves the Point
 
@@ -672,41 +785,40 @@ The full framework — including the known hallucination case library, forbidden
 
 ### Appendix: Deployment Config
 
-**Shared Mailbox**
+**Message Body (Primary)**
 ```
-shared/
-├── inbox_cc_to_openclaw.json
-└── inbox_openclaw_to_cc.json
+shared/cc_outbox.md  — CC appends messages, Assistant reads on demand
 ```
 
-**Gateway API**
+**Gateway API (Doorbell Only)**
 - Endpoint: `http://localhost:18789/v1/chat/completions`
 - Model: `openclaw/main`
-- Timeout: 120s
+- Message: `"去看 cc_outbox.md"` (6 words only, no body content)
+- Timeout: N/A (doorbell returns in < 10s; never times out)
 - Auth: Bearer Token (required even for local access)
 
-**Cron (Mailbox Check)**
-- Interval: 3 minutes
-- Reads: `inbox_cc_to_openclaw.json`
-- Logic: Has unread → process → mark as read
-
-**Callback Pattern Scripts (Production)**
-- `scripts/cc_push_server.py` — CC listens on Named Pipe for OpenClaw push notifications
-- `scripts/assistant_push.py` — OpenClaw pushes to CC via Named Pipe (`\\.\pipe\openclaw-cc-push`)
-- `scripts/call_openclaw.ps1` — CC calls Gateway API (synchronous, 120s timeout)
-- `send_to_openclaw.ps1` — CC writes to mailbox (async, fire-and-forget) — backup only
-- `check_openclaw_reply.ps1` — CC reads OpenClaw's reply from mailbox — backup only
-
-**Named Pipe (Primary, OpenClaw → CC)**
+**Named Pipe (Assistant → CC)**
 - Pipe: `\\.\pipe\openclaw-cc-push`
 - Protocol: `{"type":"push","from":"assistant","text":"...","ts":...}`
 - Latency: < 1 second
-- Fallback: Shared Mailbox
+- Fallback: cc_outbox.md
+
+**Production Scripts**
+- `call-assistant/call_assistant.ps1` — CC's one-liner: write outbox → start pipe → ring doorbell → capture reply (v4.2)
+- `shared/cc_push_server.py` — CC listens on Named Pipe for Assistant push notifications
+- `shared/assistant_push.py` — Assistant pushes to CC via Named Pipe
+- `shared/cc_outbox.md` — Message body store (primary), also serves as backup/failover channel
+
+**Deprecated (no longer used)**
+- `inbox_cc_to_openclaw.json` — replaced by cc_outbox.md (June 9, 2026)
+- `inbox_openclaw_to_cc.json` — replaced by Named Pipe (June 2026)
+- `scripts/call_openclaw.ps1` — replaced by call-assistant/call_assistant.ps1 (June 2026)
+- 3-minute mailbox polling cron — replaced by Named Pipe push (June 2026)
 
 ---
 
 *Authors: Qianmao's AI Team (CC + OpenClaw Agent)*
-*Date: June 2026 (updated June 12 — Decision Layer; June 10 — cc_outbox.md, Unicode encoding)*
+*Date: June 2026 (updated June 15 — Doorbell Pattern, Phase 5 final form; June 12 — Decision Layer; June 10 — cc_outbox.md, Unicode encoding)*
 *GitHub: [qianmao1989](https://github.com/qianmao1989)*
 
 > Questions or suggestions? Head to [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) or open an Issue.
@@ -733,7 +845,7 @@ shared/
 | 维度 | CC (Claude Code) | 小助理 (OpenClaw) |
 |------|-------------------|-------------------|
 | 运行方式 | CLI终端，Anthropic格式 | Gateway HTTP服务 |
-| 模型 | DeepSeek v4-pro（通过DeepSeek API） | mimo-v2.5-pro |
+| 模型 | DeepSeek v4-pro（通过DeepSeek API） | DeepSeek v4-pro（通过DeepSeek API） |
 | 工具 | MCP工具（Playwright、SearXNG等） | OpenClaw内置工具（exec、cron等） |
 | 会话 | 一次性任务，用完就走 | 持久会话，随叫随到 |
 
@@ -989,15 +1101,16 @@ shared/cc_outbox.md  —— CC往这里写消息，追加新条目
 
 旧的`inbox_cc_to_openclaw.json`已废弃。新格式更简单更可靠。
 
-#### 当前通道地图（2026年6月10日——最终版）
+#### 当前通道地图（2026年6月15日——最终版）
 
 ```
 ┌──────────────┬─────────────────┬──────────────────┬──────────┐
 │ 通道          │ 方向             │ 角色              │ 状态     │
 ├──────────────┼─────────────────┼──────────────────┼──────────┤
-│ Gateway API   │ CC → 小助理      │ 主力（对话）       │ ✅ 稳定（用文件/PowerShell传参） │
-│ 命名管道      │ 小助理 → CC      │ 主力（推送）       │ ✅ 稳定（UTF-8修复） │
-│ cc_outbox.md  │ 双向             │ 备用（兜底）       │ ✅ 稳定 │
+│ cc_outbox.md  │ CC → 小助理      │ 消息体（主力）     │ ✅ 稳定   │
+│ Gateway API   │ CC → 小助理      │ 门铃（纯信号）     │ ✅ 稳定   │
+│ 命名管道      │ 小助理 → CC      │ 推送通知           │ ✅ 稳定   │
+│ cc_outbox.md  │ 双向             │ 备份（兜底）       │ ✅ 稳定   │
 └──────────────┴─────────────────┴──────────────────┴──────────┘
 ```
 
@@ -1040,12 +1153,13 @@ shared/cc_outbox.md  —— CC往这里写消息，追加新条目
 
 **更新（2026年6月）：这个问题已经解决。** 命名管道方案（见上方"第三次尝试"）给了小助理一条亚秒级推送通道。
 
-#### 四阶段演进
+#### 五阶段演进
 
 1. **纯信箱（2026年5月）**：小助理写文件 → CC每3分钟轮询 → 3分钟延迟，每天200万+token
 2. **回调模式（2026年5月下旬）**：信箱当门铃 + Gateway当对话。仍需乾茂说"看信箱"
 3. **命名管道（2026年6月）**：小助理推管道 → CC即时收到 → CC自动回拨Gateway。全自动，毫秒级，零token浪费
-4. **决策层（2026年6月12日）**：CC自主判断何时发起通讯。通讯既自动化又主动化——不再需要人扣扳机。（见上方第四阶段。）
+4. **决策层（2026年6月12日）**：CC自主判断何时发起通讯。通讯既自动化又主动化——不再需要人扣扳机。
+5. **门铃定稿（2026年6月15日）**：消息体与信令分离。Gateway是门铃不是通道。DeepSeek锁死单路径。最终形态。（见上方第五阶段。）
 
 #### 回调模式，已全自动化
 
@@ -1189,6 +1303,118 @@ CC响应指令。"需要时联系小助理"被当成可选建议，不是强制�
 
 乾茂不再需要告诉CC去联系小助理——CC自己判断。人剩下的唯一角色是纯判断：方向感、品味、AI不该独自做的决策。
 
+### 第五阶段：门铃模式——Gateway是门铃，不是通道（2026年6月15日）
+
+两周的生产使用后，一条教训变得无法忽视：**正文进Gateway必超时。次次如此。**
+
+#### 问题：正文进Gateway = 死锁
+
+Phase 2-4的架构假设Gateway可以承载消息内容。实际上：
+
+- CC通过Gateway发消息 → 小助理把消息正文当作任务处理 → 小助理调工具（邮件、文件读取等）→ 每次工具调用增加10-20秒 → 叠加3个以上工具调用就撞120秒超时 → 死锁。
+- 458字符的消息触发5个工具调用，用了**80秒**。1855字的纯聊天只要43秒。决定变量不是消息长度——是**小助理是否把正文当任务执行**。
+
+根因很简单：Gateway是一个chat completion端点。如果你把任务描述放进消息，模型就会*执行*它。执行需要时间。
+
+**乾茂的总结（2026年6月15日）：** "脚本带了正文,小助理就会处理正文,必超时,这是我们的经验教训。"
+
+#### 解决方案：信令与消息体严格分离
+
+```
+信令 → Gateway（"去看 cc_outbox.md"——6个字，零处理）
+消息体 → cc_outbox.md（完整内容，按需读取）
+```
+
+Gateway API从"消息通道"降级为**纯门铃**。唯一职能：响铃，告诉小助理去哪看，然后挂断。小助理按自己的节奏读cc_outbox.md——无超时压力，无工具调用堆积。
+
+#### 冻结协议（2026年6月15日——最终形态）
+
+```
+第1步：CC写完整消息到 cc_outbox.md（追加，markdown格式）
+第2步：CC调 call_assistant.ps1 v4.2
+        → 脚本自动启动 pipe server
+        → 脚本发 Gateway："去看 cc_outbox.md"（不带正文）
+        → Gateway 10秒内完成门铃
+第3步：小助理读 cc_outbox.md，按自己的节奏处理
+第4步：小助理通过 Gateway（SSE streaming）+ 命名管道（推送通知）回复
+```
+
+#### 为什么只有一条路
+
+DeepSeek v4-pro 的指令遵循性不如 Claude。看到"多通道"就会"选一条试试"——经常选错。多次踩坑后（正文进Gateway、换通道、跳过outbox），我们把一切锁死：
+
+**冰箱铁律：一个门，一个铃。没得挑，没得试。**
+
+```
+唯一通道：
+  1. 写 cc_outbox.md
+  2. Gateway："去看 cc_outbox.md"
+
+禁止（任何情况）：
+  ❌ 正文进Gateway
+  ❌ 直接写命名管道（CC→小助理方向）
+  ❌ call_assistant.ps1 带长消息（正文去outbox，不进Gateway）
+  ❌ 飞书 / QQ / 邮件 / 其他任何通道
+  ❌ "这次试试别的方式更快"——没有别的方式
+```
+
+这不是设计偏好。这是生存规则：DeepSeek看到选项 → DeepSeek选错。砍掉选项 → 它就对了。
+
+#### call_assistant.ps1 v4.2——标准工具
+
+一行命令搞定全部：
+
+```powershell
+.\call_assistant.ps1 "CC的消息"
+```
+
+自动完成：
+- 从 openclaw.json 读 token（零配置）
+- 写完整消息到 cc_outbox.md，带时间戳
+- 检查/启动 pipe server（cc_push_server.py）
+- 发 Gateway 门铃："去看 cc_outbox.md"（6个字，永不超时）
+- 捕获 SSE 流式回复
+- 一条命令，零手动步骤
+
+#### 当前通道地图（2026年6月15日——最终版）
+
+```
+┌──────────────┬─────────────────┬──────────────────┬──────────┐
+│ 通道          │ 方向             │ 角色              │ 状态     │
+├──────────────┼─────────────────┼──────────────────┼──────────┤
+│ cc_outbox.md  │ CC → 小助理      │ 消息体（主力）     │ ✅ 稳定   │
+│ Gateway API   │ CC → 小助理      │ 门铃（纯信号）     │ ✅ 稳定   │
+│ 命名管道      │ 小助理 → CC      │ 推送通知           │ ✅ 稳定   │
+│ cc_outbox.md  │ 双向             │ 备份（兜底）       │ ✅ 稳定   │
+└──────────────┴─────────────────┴──────────────────┴──────────┘
+```
+
+Phase 3相比的关键变化：**cc_outbox.md 从备份升级为主消息体。Gateway 从"消息通道"降级为"门铃信令"。** 这是最终形态——消息体与信令完全分离。
+
+#### 本地服务角色协议（2026年6月12日）
+
+CC系统指令中的额外行为规则：
+
+| 模式 | CC的角色 | 触发条件 |
+|------|---------|----------|
+| 正常模式 | 纯报警器——报告给小助理，不诊断不检查不curl | 小助理正常响应 |
+| 兜底模式 | 有限急救——确认存活、重启Gateway、上报乾茂 | 小助理无响应 |
+
+CC不碰本地服务。小助理是基础设施维护者。CC报告，不修（除非确认小助理挂了且无法自行恢复）。
+
+#### 演进：现在是五个阶段
+
+1. **纯信箱（2026年5月）**：轮询，3分钟延迟，每天200万+token
+2. **回调模式（2026年5月下旬）**：信箱当门铃 + Gateway当对话。仍需人参与。
+3. **命名管道（2026年6月）**：推送通知，毫秒级，全自动，零token浪费。
+4. **决策层（2026年6月12日）**：CC自主判断何时发起通讯。主动+自动。
+5. **门铃定稿（2026年6月15日）**：消息体与信令分离。Gateway是门铃不是通道。DeepSeek锁死单路径。最终形态。
+
+**每个阶段从人身上移除了什么：**
+- 阶段3：移除"看信箱"（消息中继）
+- 阶段4：移除"去问小助理"（发起决策）
+- 阶段5：移除"怎么又超时了"（协议可靠性）
+
 ### 花絮：这篇文章本身就是两个AI直接对话的产物
 
 这篇文章的写作过程，恰好就是"为什么要搞多Agent通信"的一次实战演示：
@@ -1235,7 +1461,7 @@ AIs负责技术写作、审校、修改——这恰好是它们擅长的。人�
 ---
 
 *作者：乾茂的AI团队（CC + 小助理）*
-*日期：2026年5月，2026年6月12日更新（决策层）；6月10日更新（cc_outbox.md、Unicode编码坑）*
+*日期：2026年5月，2026年6月15日更新（门铃定稿，Phase 5最终形态）；6月12日更新（决策层）；6月10日更新（cc_outbox.md、Unicode编码坑）*
 *GitHub：[qianmao1989](https://github.com/qianmao1989)*
 
 > 有问题或建议？请到 [Discussions](https://github.com/qianmao1989/multi-agent-communication/discussions) 留言，或直接开 Issue。
